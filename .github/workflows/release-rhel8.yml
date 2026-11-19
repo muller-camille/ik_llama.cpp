@@ -52,9 +52,9 @@ jobs:
           - variant: avx512
             arch: '-march=x86-64-v4 -mavx512vnni'
             defines: '-DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON'
-          # Sapphire Rapids, Zen 4 and newer
+          # Sapphire Rapids, Zen 4 and newer; the VPOPCNTDQ paths also use BITALG
           - variant: avx512-bf16
-            arch: '-march=x86-64-v4 -mavx512vnni -mavx512vbmi -mavx512bf16 -mavx512vpopcntdq'
+            arch: '-march=x86-64-v4 -mavx512vnni -mavx512vbmi -mavx512bf16 -mavx512vpopcntdq -mavx512bitalg'
             defines: '-DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_BF16=ON'
 
     steps:
@@ -166,7 +166,7 @@ jobs:
               variant=avx2
               if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni; then
                   variant=avx512
-                  if has avx512vbmi avx512_bf16 avx512_vpopcntdq; then
+                  if has avx512vbmi avx512_bf16 avx512_vpopcntdq avx512_bitalg; then
                       variant=avx512-bf16
                   fi
               fi
@@ -199,7 +199,7 @@ jobs:
           run avx2
           # the runner CPU decides which of the AVX-512 builds can be run here
           if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni; then run avx512; else echo "::warning::avx512 build not run, the runner CPU has no AVX-512 VNNI"; fi
-          if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni avx512vbmi avx512_bf16 avx512_vpopcntdq; then run avx512-bf16; else echo "::warning::avx512-bf16 build not run, the runner CPU has no AVX-512 BF16"; fi
+          if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni avx512vbmi avx512_bf16 avx512_vpopcntdq avx512_bitalg; then run avx512-bf16; else echo "::warning::avx512-bf16 build not run, the runner CPU has no AVX-512 BF16"; fi
           echo "=== launcher"
           ./llama-server --version
           ./llama-cli -m /pkg/stories15M-q4_0.gguf -p "Once upon a time" -n 8 --no-warmup -t 2 < /dev/null 2> /tmp/err.log
