@@ -2593,19 +2593,30 @@ void llm_load_hparams(
                     ml.get_key(LLM_KV_HASH_LAYER_COUNT, hparams.dsv4_hash_layer_count, false);
 
                     if (model.arch == LLM_ARCH_DEEPSEEK41) {
-                        ml.get_arr_n(LLM_KV_ENGRAM_LAYER_IDS, hparams.engram_n_layer);
+                        // upstream llama.cpp GGUFs carry the same constants under the PLE keys; their
+                        // head offsets are absolute, into one table that holds every engram layer
+                        uint32_t n_ple_layers = 0;
+                        const bool ple_keys = !ml.get_arr_n(LLM_KV_ENGRAM_LAYER_IDS, hparams.engram_n_layer, false) &&
+                                               ml.get_arr_n(LLM_KV_PLE_LAYERS, n_ple_layers, false);
+                        const enum llm_kv kv_layer_ids   = ple_keys ? LLM_KV_PLE_LAYERS                 : LLM_KV_ENGRAM_LAYER_IDS;
+                        const enum llm_kv kv_head_count  = ple_keys ? LLM_KV_PLE_HEADS_PER_NGRAM        : LLM_KV_ENGRAM_HEAD_COUNT;
+                        const enum llm_kv kv_key_length  = ple_keys ? LLM_KV_EMBEDDING_LENGTH_PER_LAYER : LLM_KV_ENGRAM_KEY_LENGTH;
+                        const enum llm_kv kv_ngram_size  = ple_keys ? LLM_KV_PLE_NGRAM_SIZE             : LLM_KV_ENGRAM_MAX_NGRAM_SIZE;
+                        const enum llm_kv kv_multipliers = ple_keys ? LLM_KV_PLE_LAYER_MULTIPLIERS      : LLM_KV_ENGRAM_MULTIPLIERS;
+                        const enum llm_kv kv_primes      = ple_keys ? LLM_KV_PLE_HEAD_VOCAB_SIZES       : LLM_KV_ENGRAM_PRIMES;
+                        const enum llm_kv kv_offsets     = ple_keys ? LLM_KV_PLE_HEAD_OFFSETS           : LLM_KV_ENGRAM_OFFSETS;
+                        ml.get_arr_n(kv_layer_ids, hparams.engram_n_layer);
                         if (hparams.engram_n_layer == 0 || hparams.engram_n_layer > LLAMA_MAX_LAYERS) {
                             throw std::runtime_error(format("DeepSeek-V4.1 engram layer count %u is out of range", hparams.engram_n_layer));
                         }
                         {
                             std::vector<uint32_t> ids;
-                            ml.get_arr(ml.llm_kv(LLM_KV_ENGRAM_LAYER_IDS), ids);
+                            ml.get_arr(ml.llm_kv(kv_layer_ids), ids);
                             std::copy_n(ids.begin(), std::min<size_t>(ids.size(), LLAMA_MAX_LAYERS), hparams.engram_layer_ids.begin());
                         }
-                        ml.get_key(LLM_KV_ENGRAM_HEAD_COUNT,     hparams.engram_n_head);
-                        ml.get_key(LLM_KV_ENGRAM_KEY_LENGTH,     hparams.engram_key_length);
-                        ml.get_key(LLM_KV_ENGRAM_MAX_NGRAM_SIZE, hparams.engram_max_ngram_size);
-                        ml.get_key(LLM_KV_ENGRAM_PAD_ID,         model.engram_pad_id);
+                        ml.get_key(kv_head_count, hparams.engram_n_head);
+                        ml.get_key(kv_key_length, hparams.engram_key_length);
+                        ml.get_key(kv_ngram_size, hparams.engram_max_ngram_size);
                         if (hparams.engram_n_head == 0 || hparams.engram_max_ngram_size < 2) {
                             throw std::runtime_error("DeepSeek-V4.1 engram needs at least one head and a 2-gram");
                         }
@@ -2614,10 +2625,21 @@ void llm_load_hparams(
                                 throw std::runtime_error(format("engram layer %u is out of range", hparams.engram_layer_ids[e]));
                             }
                         }
-                        ml.get_arr(ml.llm_kv(LLM_KV_ENGRAM_MULTIPLIERS), model.engram_multipliers);
-                        ml.get_arr(ml.llm_kv(LLM_KV_ENGRAM_PRIMES),      model.engram_primes);
-                        ml.get_arr(ml.llm_kv(LLM_KV_ENGRAM_OFFSETS),     model.engram_offsets);
+                        ml.get_arr(ml.llm_kv(kv_multipliers),            model.engram_multipliers);
+                        ml.get_arr(ml.llm_kv(kv_primes),                 model.engram_primes);
+                        ml.get_arr(ml.llm_kv(kv_offsets),                model.engram_offsets);
                         ml.get_arr(ml.llm_kv(LLM_KV_ENGRAM_TOKEN_MAP),   model.engram_token_map);
+                        if (ple_keys) {
+                            // upstream stores the pad as a token id, the hash wants its compressed id
+                            uint32_t pad_token = 0;
+                            ml.get_key(LLM_KV_ENGRAM_PAD_TOKEN_ID, pad_token);
+                            if (pad_token >= model.engram_token_map.size()) {
+                                throw std::runtime_error(format("engram pad token %u is outside the token map", pad_token));
+                            }
+                            model.engram_pad_id = model.engram_token_map[pad_token];
+                        } else {
+                            ml.get_key(LLM_KV_ENGRAM_PAD_ID, model.engram_pad_id);
+                        }
                         const size_t n_bucket = (size_t) (hparams.engram_max_ngram_size - 1) * hparams.engram_n_head;
                         if (model.engram_multipliers.size() != (size_t) hparams.engram_n_layer * hparams.engram_max_ngram_size) {
                             throw std::runtime_error("engram multiplier count does not match layers * ngram size");
@@ -2735,6 +2757,10 @@ void llm_load_hparams(
                         }
                         ml.get_key(LLM_KV_CANDIDATE_BLOCK_SIZE,  hparams.dsv4_candidate_block_size,  false);
                         ml.get_key(LLM_KV_CANDIDATE_TOPK_BLOCKS, hparams.dsv4_candidate_topk_blocks, false);
+                        // the same three under their upstream llama.cpp names
+                        ml.get_key(LLM_KV_INDEXER_CANDIDATE_SOURCE_LAYER, hparams.dsv4_candidate_source_layer, false);
+                        ml.get_key(LLM_KV_INDEXER_CANDIDATE_BLOCK_SIZE,   hparams.dsv4_candidate_block_size,   false);
+                        ml.get_key(LLM_KV_INDEXER_CANDIDATE_TOPK_BLOCKS,  hparams.dsv4_candidate_topk_blocks,  false);
                         if (hparams.dsv4_candidate_source_layer < 0) { hparams.dsv4_candidate_source_layer = 20; }
                         if (hparams.dsv4_candidate_block_size == 0)  { hparams.dsv4_candidate_block_size  = 8; }
                         if (hparams.dsv4_candidate_topk_blocks == 0) { hparams.dsv4_candidate_topk_blocks = 2048; }

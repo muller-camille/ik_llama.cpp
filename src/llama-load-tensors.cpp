@@ -3929,6 +3929,9 @@ bool create_tensors_helper::create_deepseek4_tensors(const LLM_TN & tn) {
     model.output_norm = create_tensor_from_meta(ctx_output, "output_norm.weight");
     model.output      = create_tensor_from_meta(ctx_output, "output.weight");
 
+    // upstream llama.cpp V4.1 GGUFs: every engram table in one tensor, rows in layer order
+    ggml_tensor * engram_table = create_tensor_from_meta(ctx_input, "per_layer_token_embd.weight", llama_model_loader::TENSOR_NOT_REQUIRED);
+
     const int hc_head_flags = is_standalone_mtp ? 0 : llama_model_loader::TENSOR_NOT_REQUIRED;
     model.hc_head_base  = create_tensor_from_meta(ctx_output, pick_tensor_name({"hc_head_base.weight", "output_hc_base.weight"}), hc_head_flags);
     model.hc_head_fn    = create_tensor_from_meta(ctx_output, pick_tensor_name({"hc_head_fn.weight", "output_hc_fn.weight"}), hc_head_flags);
@@ -4072,6 +4075,20 @@ bool create_tensors_helper::create_deepseek4_tensors(const LLM_TN & tn) {
             layer.engram_wkv = create_tensor_from_meta(ctx_split, format("blk.%d.engram_wkv.weight", i));
             layer.engram_k   = create_tensor_from_meta(ctx_split, format("blk.%d.engram_k.weight", i));
             layer.engram_q   = create_tensor_from_meta(ctx_split, format("blk.%d.engram_q.weight", i));
+        } else if (engram_table && hparams.engram_index(i) >= 0) {
+            // upstream llama.cpp layout: the layers share one table through absolute head offsets,
+            // and engram_gate is k*q, so it loads as k and q stays unset
+            const size_t n_cols = (size_t) (hparams.engram_max_ngram_size - 1) * hparams.engram_n_head;
+            const size_t eg     = (size_t) hparams.engram_index(i);
+            for (size_t c = eg*n_cols; c < (eg + 1)*n_cols; ++c) {
+                if (model.engram_offsets[c] + model.engram_primes[c] > (uint64_t) engram_table->ne[1]) {
+                    throw std::runtime_error(format("engram head %zu of layer %d reads past the %lld rows of per_layer_token_embd",
+                                c % n_cols, i, (long long) engram_table->ne[1]));
+                }
+            }
+            layer.engram_embd = engram_table;
+            layer.engram_wkv  = create_tensor_from_meta(ctx_split, format("blk.%d.engram_kv.weight", i));
+            layer.engram_k    = create_tensor_from_meta(ctx_split, format("blk.%d.engram_gate.weight", i));
         }
 
     }
