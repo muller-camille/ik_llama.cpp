@@ -84,9 +84,18 @@ struct llama_model_loader {
                 const size_t size = ggml_nbytes(tensor);
                 const size_t alignment = gguf_get_alignment(gguf_ctx);
                 const size_t padded = GGML_PAD(size, alignment);
-                if (end < offs || end - offs < size || end - offs > padded) {
-                    throw std::runtime_error(format("tensor '%s': type 43 is not one-byte F8_E4M3 (expected %zu bytes, at most %zu with padding, stored extent %zu); block-scaled MXFP8 is not supported",
-                                name, size, padded, end >= offs ? end - offs : 0));
+                // other llama.cpp builds use type 43 for MXFP8: one scale byte in front of every 32 codes
+                const size_t size_mxfp8 = size/32*33;
+                if (tensor->ne[0] % 32 == 0 && end >= offs && end - offs >= size_mxfp8 && end - offs <= GGML_PAD(size_mxfp8, alignment)) {
+                    tensor->type  = GGML_TYPE_MXFP8;
+                    tensor->nb[0] = ggml_type_size(GGML_TYPE_MXFP8);
+                    tensor->nb[1] = tensor->nb[0]*(tensor->ne[0]/ggml_blck_size(GGML_TYPE_MXFP8));
+                    for (int d = 2; d < GGML_MAX_DIMS; ++d) {
+                        tensor->nb[d] = tensor->nb[d-1]*tensor->ne[d-1];
+                    }
+                } else if (end < offs || end - offs < size || end - offs > padded) {
+                    throw std::runtime_error(format("tensor '%s': type 43 is neither one-byte F8_E4M3 nor MXFP8 (expected %zu or %zu bytes, stored extent %zu)",
+                                name, size, size_mxfp8, end >= offs ? end - offs : 0));
                 }
             }
 

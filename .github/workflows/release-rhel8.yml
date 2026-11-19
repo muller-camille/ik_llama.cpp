@@ -233,7 +233,13 @@ jobs:
           - No extra packages are needed, the OpenMP runtime is in \`lib/\`.
           - A build made on the machine itself with \`-DGGML_NATIVE=ON\` can still be faster.
 
-          DeepSeek-V4.1 from an upstream llama.cpp GGUF (for example \`unsloth/DeepSeek-V4.1-Flash-1017-GGUF\`): the quants that ship an MXFP8 engram table need another table, stamped with the quant's table slot and passed with \`--ngram-file\`:
+          DeepSeek-V4.1 from an upstream llama.cpp GGUF (for example \`unsloth/DeepSeek-V4.1-Flash-1017-GGUF\`) loads as it is, MXFP8 engram table included:
+
+          \`\`\`
+          ./llama-server -m UD-Q4_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf --jinja --swa-compress
+          \`\`\`
+
+          To use a smaller engram table, stamp it with the quant's table slot and pass it with \`--ngram-file\`; the quant's own table shard is then not needed:
 
           \`\`\`
           python engram/set_split.py engram/DeepSeek-V4.1-Flash-1017-engram-Q6_K.gguf_file 8 9

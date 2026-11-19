@@ -477,6 +477,7 @@ extern "C" {
         GGML_TYPE_NVFP4_KS   = 168,
         GGML_TYPE_F8_E4M3_KS = 169,
         GGML_TYPE_F8_E4M3_B128 = 170,
+        GGML_TYPE_MXFP8      = 171, // E4M3 with one E8M0 scale per 32 values, get_rows only (on-disk id 43, remapped at load)
 
         GGML_TYPE_Q4_0_R8    = 202,
         GGML_TYPE_Q5_0_R4    = 206,

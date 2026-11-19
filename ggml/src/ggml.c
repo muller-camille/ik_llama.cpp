@@ -662,6 +662,17 @@ static void ggml_fp8_e4m3_ks_to_fp32_row(const void * vx, float * y, int64_t n) 
     for (int64_t i = 0; i < n; ++i) y[i] *= scale;
 }
 
+// MXFP8 (OCP MX): blocks of one E8M0 scale and 32 E4M3 codes, value = e4m3 * 2^(e8m0 - 127)
+static void ggml_mxfp8_to_fp32_row(const void * vx, float * y, int64_t n) {
+    const uint8_t * x = vx;
+    assert(n % 32 == 0);
+    for (int64_t i = 0; i < n; i += 32) {
+        const float scale = x[0] == 0xFF ? NAN : ggml_e8m0_to_fp32(x[0]);
+        for (int j = 0; j < 32; ++j) y[i + j] = ggml_table_f8_e4m3[x[1 + j]] * scale;
+        x += 33;
+    }
+}
+
 static void ggml_fp8_e4m3_b128_to_fp32_row(const void * vx, float * y, int64_t n) {
     const char * x = vx;
     assert(n % 128 == 0);
@@ -1649,6 +1660,14 @@ static const ggml_type_traits_t type_traits[GGML_TYPE_COUNT] = {
         .type_size                = sizeof(ggml_fp8_e4m3_t),
         .is_quantized             = true,
         .to_float                 = ggml_fp8_e4m3_to_fp32_row,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_MXFP8] = {
+        .type_name                = "mxfp8",
+        .blck_size                = 32,
+        .type_size                = 1 + 32,
+        .is_quantized             = true,
+        .to_float                 = ggml_mxfp8_to_fp32_row,
         .nrows                    = 1,
     },
     [GGML_TYPE_F8_E4M3_B128] = {
@@ -21024,6 +21043,7 @@ static void ggml_compute_forward_get_rows(
     }
 
     switch (src0->type) {
+        case GGML_TYPE_MXFP8:
         case GGML_TYPE_F8_E4M3_B128:
         case GGML_TYPE_F8_E4M3_KS:
         case GGML_TYPE_Q4_0:
@@ -21809,6 +21829,7 @@ static void ggml_compute_forward_clamp(
         case GGML_TYPE_F8_E4M3:
         case GGML_TYPE_F8_E4M3_KS:
         case GGML_TYPE_F8_E4M3_B128:
+        case GGML_TYPE_MXFP8:
         case GGML_TYPE_F16:
         case GGML_TYPE_BF16:
         case GGML_TYPE_BF16_R16:
