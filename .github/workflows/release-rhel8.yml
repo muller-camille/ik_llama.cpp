@@ -1,0 +1,253 @@
+name: Release (RHEL 8, CPU)
+
+# CPU-only Linux x64 release for RHEL 8.10, built on Enterprise Linux 8 (glibc 2.28).
+# The kernels are selected at compile time, so there is one static build per CPU level
+# and a launcher that starts the one matching the machine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (empty = rhel8-b<commit count>)'
+        required: false
+        default: ''
+        type: string
+      create_release:
+        description: 'Create the tag and the GitHub release (off = build only)'
+        required: true
+        type: boolean
+        default: true
+  push:
+    tags: ['rhel8-*']
+  pull_request:
+    paths: ['.github/workflows/release-rhel8.yml']
+
+permissions:
+  contents: read
+
+env:
+  BUILD_IMAGE: docker.io/library/almalinux:8
+  TEST_IMAGE: registry.access.redhat.com/ubi8/ubi:8.10
+  TEST_MODEL_URL: https://huggingface.co/ggml-org-dev/stories15M/resolve/main/stories15M-q4_0.gguf
+  TOOLS: llama-server llama-cli llama-sweep-bench llama-bench llama-quantize llama-gguf-split
+
+concurrency:
+  group: release-rhel8-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build / ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86-64-v3: Haswell, Zen 1 and newer
+          - variant: avx2
+            arch: '-march=x86-64-v3'
+            defines: ''
+          # Cascade Lake, Ice Lake, Zen 4 and newer
+          - variant: avx512
+            arch: '-march=x86-64-v4 -mavx512vnni'
+            defines: '-DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON'
+          # Sapphire Rapids, Zen 4 and newer; the VPOPCNTDQ paths also use BITALG
+          - variant: avx512-bf16
+            arch: '-march=x86-64-v4 -mavx512vnni -mavx512vbmi -mavx512bf16 -mavx512vpopcntdq -mavx512bitalg'
+            defines: '-DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_BF16=ON'
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build
+        env:
+          VARIANT: ${{ matrix.variant }}
+          ARCH: ${{ matrix.arch }}
+          DEFINES: ${{ matrix.defines }}
+        run: |
+          docker run --rm -i -v "$PWD:/src" -w /src -e VARIANT -e ARCH -e DEFINES -e TOOLS -e HOST_OWNER="$(id -u):$(id -g)" "$BUILD_IMAGE" bash -ex -s <<'EOF'
+          dnf install -y git cmake make gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ gcc-toolset-14-binutils
+          source /opt/rh/gcc-toolset-14/enable
+          git config --global --add safe.directory /src
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib' \
+            -DCMAKE_C_FLAGS="$ARCH" \
+            -DCMAKE_CXX_FLAGS="$ARCH" \
+            $DEFINES
+          cmake --build build -j "$(nproc)" --target $TOOLS
+          mkdir -p "out/$VARIANT" out/lib
+          for t in $TOOLS; do cp "build/bin/$t" "out/$VARIANT/"; done
+          # ship the OpenMP runtime, a minimal RHEL install does not have it
+          gomp="$(ldd build/bin/llama-server | awk '/libgomp/ { print $3 }')"
+          test -n "$gomp"
+          cp -L "$gomp" out/lib/libgomp.so.1
+          ldd build/bin/llama-server
+          chown -R "$HOST_OWNER" build out
+          EOF
+          tar -cf "bin-${VARIANT}.tar" -C out .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.variant }}
+          path: bin-${{ matrix.variant }}.tar
+          retention-days: 3
+
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write # for creating the tag and the release
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine tag name
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="rhel8-b$(git rev-list --count HEAD)"
+          fi
+          if ! git check-ref-format "refs/tags/${TAG}"; then
+            echo "::error::invalid tag name: ${TAG}"
+            exit 1
+          fi
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifact
+          merge-multiple: true
+
+      - name: Pack
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          DIR="pkg/ik_llama-${TAG}"
+          mkdir -p "$DIR"
+          for f in artifact/bin-*.tar; do tar -xf "$f" -C "$DIR"; done
+          cp LICENSE "$DIR/"
+
+          cat > launcher <<'EOF'
+          #!/bin/bash
+          # Starts the build of this tool that matches the CPU.
+          # IK_LLAMA_VARIANT=avx2|avx512|avx512-bf16 overrides the choice.
+          dir="$(dirname "$(readlink -f "$0")")"
+          tool="$(basename "$0")"
+          flags=" $(grep -m1 '^flags' /proc/cpuinfo) "
+          has() { for f in "$@"; do [[ $flags == *" $f "* ]] || return 1; done; }
+          variant="${IK_LLAMA_VARIANT:-}"
+          if [[ -z $variant ]]; then
+              if ! has avx2 fma f16c bmi1 bmi2 abm movbe; then
+                  echo "$tool: this CPU has no AVX2, no build in this package runs on it" >&2
+                  exit 1
+              fi
+              variant=avx2
+              if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni; then
+                  variant=avx512
+                  if has avx512vbmi avx512_bf16 avx512_vpopcntdq avx512_bitalg; then
+                      variant=avx512-bf16
+                  fi
+              fi
+          fi
+          exec "$dir/$variant/$tool" "$@"
+          EOF
+          for t in $TOOLS; do install -m 755 launcher "$DIR/$t"; done
+
+          ls -lR pkg | head -60
+          tar -czf "ik_llama-${TAG}-bin-rhel8-x64.tar.gz" -C pkg "ik_llama-${TAG}"
+          ls -l "ik_llama-${TAG}-bin-rhel8-x64.tar.gz"
+
+      - name: Test on RHEL 8.10 (UBI image)
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          curl -fsSL --retry 3 -o pkg/stories15M-q4_0.gguf "$TEST_MODEL_URL"
+          docker run --rm -i -v "$PWD/pkg:/pkg:ro" -w "/pkg/ik_llama-${TAG}" "$TEST_IMAGE" bash -e -s <<'EOF'
+          cat /etc/redhat-release
+          grep -m1 'model name' /proc/cpuinfo
+          flags=" $(grep -m1 '^flags' /proc/cpuinfo) "
+          has() { for f in "$@"; do [[ $flags == *" $f "* ]] || return 1; done; }
+          run() {
+              echo "=== $1"
+              IK_LLAMA_VARIANT="$1" ./llama-server --version
+              IK_LLAMA_VARIANT="$1" ./llama-cli -m /pkg/stories15M-q4_0.gguf -p "Once upon a time" -n 24 --no-warmup -t 2 < /dev/null 2> /tmp/err.log || { cat /tmp/err.log; exit 1; }
+              echo
+              grep -E 'system_info|eval time' /tmp/err.log
+          }
+          run avx2
+          # the runner CPU decides which of the AVX-512 builds can be run here
+          if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni; then run avx512; else echo "::warning::avx512 build not run, the runner CPU has no AVX-512 VNNI"; fi
+          if has avx512f avx512bw avx512dq avx512vl avx512cd avx512_vnni avx512vbmi avx512_bf16 avx512_vpopcntdq avx512_bitalg; then run avx512-bf16; else echo "::warning::avx512-bf16 build not run, the runner CPU has no AVX-512 BF16"; fi
+          echo "=== launcher"
+          ./llama-server --version
+          ./llama-cli -m /pkg/stories15M-q4_0.gguf -p "Once upon a time" -n 8 --no-warmup -t 2 < /dev/null 2> /tmp/err.log
+          echo
+          grep -E 'system_info' /tmp/err.log
+          EOF
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ik_llama-${{ steps.tag.outputs.name }}-bin-rhel8-x64
+          path: ik_llama-${{ steps.tag.outputs.name }}-bin-rhel8-x64.tar.gz
+          retention-days: 7
+
+      - name: Create release
+        if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.create_release) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          FILE="ik_llama-${TAG}-bin-rhel8-x64.tar.gz"
+          sha256sum "$FILE" > SHA256SUMS.txt
+
+          cat > notes.md <<EOF
+          CPU-only build of ik_llama.cpp at ${GITHUB_SHA} for RHEL 8.10 (Linux x64, glibc 2.28). No GPU backend.
+
+          Package: \`${FILE}\`
+
+          - Three static builds: \`avx2\` (Haswell, Zen 1 and newer), \`avx512\` (Cascade Lake, Ice Lake, Zen 4 and newer), \`avx512-bf16\` (Sapphire Rapids, Zen 4 and newer).
+          - \`llama-server\`, \`llama-cli\`, ... in the top directory are launchers: they start the build that matches the CPU. Set \`IK_LLAMA_VARIANT\` to pick one by hand.
+          - No extra packages are needed, the OpenMP runtime is in \`lib/\`.
+          - A build made on the machine itself with \`-DGGML_NATIVE=ON\` can still be faster.
+
+          DeepSeek-V4.1 from an upstream llama.cpp GGUF (for example \`unsloth/DeepSeek-V4.1-Flash-1017-GGUF\`): the quants that ship an MXFP8 engram table need another table, stamped with the quant's table slot and passed with \`--ngram-file\`:
+
+          \`\`\`
+          python engram/set_split.py engram/DeepSeek-V4.1-Flash-1017-engram-Q6_K.gguf_file 8 9
+          ./llama-server -m UD-Q4_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf \\
+              --ngram-file engram/DeepSeek-V4.1-Flash-1017-engram-Q6_K.gguf_file --jinja --swa-compress
+          \`\`\`
+          EOF
+
+          ARGS=()
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            ARGS+=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$TAG" "$FILE" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG (RHEL 8, CPU)" \
+            --notes-file notes.md \
+            "${ARGS[@]}"
