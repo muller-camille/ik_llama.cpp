@@ -348,6 +348,39 @@ static value default_value(const func_args & args) {
     return no_value ? args.get_pos(1) : args.get_pos(0);
 }
 
+// dict(): from kwargs, a mapping and/or an iterable of [key, value] pairs
+static value toobject(const func_args & args) {
+    auto out = mk_val<value_object>();
+    value iter = args.get_pos(0, mk_val<value_undefined>());
+    bool iter_first = false;
+    if (is_val<value_array>(iter)) {
+        iter_first = true;
+        for (const auto & it : iter->as_array()) {
+            if (is_val<value_array>(it) && it->as_array().size() == 2) {
+                auto tuple = it->as_array();
+                out->insert(tuple[0], tuple[1]);
+            } else {
+                throw raised_exception("dict() iterable argument must consist of tuples, not " + it->type());
+            }
+        }
+    } else if (is_val<value_object>(iter)) {
+        iter_first = true;
+        for (const auto & pair : iter->as_ordered_object()) {
+            out->insert(pair.first, pair.second);
+        }
+    }
+    for (const auto & arg : args.get_args()) {
+        if (is_val<value_kwarg>(arg)) {
+            auto kwarg = cast_val<value_kwarg>(arg);
+            out->insert(kwarg->key, kwarg->val);
+        } else if (!iter_first) {
+            throw raised_exception("dict() arguments must be kwargs, dict and/or iterable of tuples, not " + arg->type());
+        }
+        iter_first = false;
+    }
+    return out;
+}
+
 const func_builtins & global_builtins() {
     static const func_builtins builtins = {
         {"raise_exception", [](const func_args & args) -> value {
@@ -355,6 +388,7 @@ const func_builtins & global_builtins() {
             std::string msg = args.get_pos(0)->as_string().str();
             throw raised_exception("Jinja Exception: " + msg);
         }},
+        {"dict", toobject},
         {"namespace", [](const func_args & args) -> value {
             auto out = mk_val<value_object>();
             for (const auto & arg : args.get_args()) {

@@ -1653,6 +1653,10 @@ static const std::map<llm_arch, std::map<llm_tensor, std::string>> LLM_TENSOR_NA
             { LLM_TENSOR_ENGRAM_K,               "blk.%d.engram_k" },
             { LLM_TENSOR_ENGRAM_Q,               "blk.%d.engram_q" },
             { LLM_TENSOR_ENGRAM_WKV,             "blk.%d.engram_wkv" },
+            // upstream llama.cpp names: one table for all engram layers, k*q as one gate
+            { LLM_TENSOR_ENGRAM_GATE,            "blk.%d.engram_gate" },
+            { LLM_TENSOR_ENGRAM_KV,              "blk.%d.engram_kv" },
+            { LLM_TENSOR_PER_LAYER_TOKEN_EMBD,   "per_layer_token_embd" },
         },
     },
     {

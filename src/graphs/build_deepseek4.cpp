@@ -1145,12 +1145,16 @@ static ggml_tensor * ds4_build_engram(ggml_context * ctx0, llm_build_context & l
     auto grouped_norm = [&](ggml_tensor * t, ggml_tensor * w) {
         t = ggml_reshape_3d(ctx0, t, n_embd, hc, nt);
         t = ggml_rms_norm(ctx0, t, hparams.f_norm_rms_eps);
+        if (w == nullptr) {
+            return t;
+        }
         t = ggml_reshape_2d(ctx0, t, hc_dim, nt);
         t = ggml_mul(ctx0, t, w);
         return ggml_reshape_3d(ctx0, t, n_embd, hc, nt);
     };
+    // upstream llama.cpp GGUFs fold q into k (engram_gate), so q has no scale of its own
     ggml_tensor * k = grouped_norm(key, as_f32(layer.engram_k, "engram_k"));
-    ggml_tensor * q = grouped_norm(ggml_cont(ctx0, x), as_f32(layer.engram_q, "engram_q"));
+    ggml_tensor * q = grouped_norm(ggml_cont(ctx0, x), layer.engram_q ? as_f32(layer.engram_q, "engram_q") : nullptr);
 
     ggml_tensor * s = ggml_sum_rows(ctx0, ggml_mul(ctx0, k, q));                 // [1, hc, nt]
     s = ggml_scale(ctx0, s, 1.0f/sqrtf((float) n_embd));

@@ -4588,6 +4588,19 @@ static std::pair<std::vector<double>, double> get_layer_sizes(const llama_model_
             output_misc_size += size;
             continue;
         }
+        if (model.arch == LLM_ARCH_DEEPSEEK41 && name == "per_layer_token_embd.weight") {
+            // upstream llama.cpp layout: one table for all engram layers, charge each layer its rows
+            const auto & hp = model.hparams;
+            const size_t n_cols = (size_t) (hp.engram_max_ngram_size - 1) * hp.engram_n_head;
+            for (uint32_t e = 0; e < hp.engram_n_layer; ++e) {
+                size_t n_rows = 0;
+                for (size_t c = e*n_cols; c < (e + 1)*n_cols; ++c) {
+                    n_rows += model.engram_primes[c];
+                }
+                result[hp.engram_layer_ids[e]] += n_rows * t->nb[1];
+            }
+            continue;
+        }
         auto pos = name.find("blk.");
         if (pos != 0) {
             LLAMA_LOG_WARN("Oops: tensor with strange name %s\n", name.c_str());
