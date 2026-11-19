@@ -239,6 +239,13 @@ jobs:
           ./llama-server -m UD-Q4_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf --jinja --swa-compress
           \`\`\`
 
+          Speculative decoding with the DSpark draft of the same repo is optional and does not change the output; the server log prints the draft acceptance rate:
+
+          \`\`\`
+          ./llama-server -m UD-Q4_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf \\
+              -md dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf --spec-type dspark:n_max=3 --jinja --swa-compress
+          \`\`\`
+
           To use a smaller engram table, stamp it with the quant's table slot and pass it with \`--ngram-file\`; the quant's own table shard is then not needed:
 
           \`\`\`
