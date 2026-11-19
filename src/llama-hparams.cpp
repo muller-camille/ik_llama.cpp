@@ -2540,10 +2540,11 @@ void llm_load_hparams(
                 ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp);
                 ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,        hparams.n_expert_shared);
 
-                // DSA parameters
-                ml.get_key(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT, hparams.indexer_n_head);
-                ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, hparams.indexer_head_size);
-                ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,      hparams.indexer_top_k);
+                // DSA parameters; a draft has no indexer and upstream llama.cpp drafts leave them out
+                const bool indexer_required = model.arch != LLM_ARCH_DFLASH;
+                ml.get_key(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT, hparams.indexer_n_head,    indexer_required);
+                ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, hparams.indexer_head_size, indexer_required);
+                ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,      hparams.indexer_top_k,     indexer_required);
 
                 if (is_dsv4) {
                     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa, false);
@@ -2849,11 +2850,22 @@ void llm_load_hparams(
                             hparams,
                             true);
 
-                    for (uint32_t i = 0; i < hparams.dflash_n_target_layers; ++i) {
+                    // upstream llama.cpp V4.1 drafts (hyper_connection.single_pass) store the ids zero-based
+                    bool zero_based_ids = false;
+                    ml.get_key("dflash.hyper_connection.single_pass", zero_based_ids, false);
+                    for (uint32_t i = 0; i < hparams.dflash_n_target_layers && !zero_based_ids; ++i) {
                         if (hparams.dflash_target_layer_ids[i] == 0) {
                             throw std::runtime_error("dflash: target_layers must use one-based IDs");
                         }
                         --hparams.dflash_target_layer_ids[i];
+                    }
+                    {
+                        std::string ids;
+                        for (uint32_t i = 0; i < hparams.dflash_n_target_layers; ++i) {
+                            ids += format(" %u", hparams.dflash_target_layer_ids[i]);
+                        }
+                        LLAMA_LOG_INFO("%s: DSV4 draft reads target layers%s (%s ids in the file)\n", __func__, ids.c_str(),
+                                zero_based_ids ? "zero-based" : "one-based");
                     }
 
                     hparams.dflash_n_target_features = hparams.n_embd * hparams.dflash_n_target_layers;
