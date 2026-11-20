@@ -140,6 +140,9 @@ llama_test(test-serial-nodes)
 llama_build(test-small-ops.cpp)
 llama_test(test-small-ops)
 
+llama_build(test-share-rows.cpp)
+llama_test(test-share-rows)
+
 # the profile is printed when the process exits: both matrix multiplications in one row, the add in another
 llama_build(test-profile.cpp)
 llama_test(test-profile)

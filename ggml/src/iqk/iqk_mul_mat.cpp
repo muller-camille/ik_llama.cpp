@@ -11,6 +11,9 @@
 
 #if defined IQK_IMPLEMENT
 
+#include <atomic>
+#include <climits>
+#include <cstdint>
 #include <cstring>
 #include <cfloat>
 #include <type_traits>
@@ -60,10 +63,16 @@ namespace {
 struct MulMat {
     std::array<mul_mat_t, IQK_MAX_NY> funcs = {};
     mul_mat_t func16 = nullptr;
+    // For a caller that computes one run of rows in several calls (iqk_mul_mat_share_run): where the run ends,
+    // and whether this call goes on where the last one stopped.
+    const char * run_end = nullptr;
+    bool run_goes_on = false;
     inline void mul_mat_NxM(int n, const void * vx, size_t bx, DataInfo& info, int nrc_x, int nrc_y) {
         // the rows [vx, x_end) are read in one run, whatever the tiles below
-        info.x_end = (const char *)vx + (size_t)nrc_x*bx;
-        iqk_prefetch_start(vx, (size_t)nrc_x*bx);
+        info.x_end = run_end ? run_end : (const char *)vx + (size_t)nrc_x*bx;
+        if (!run_goes_on) {
+            iqk_prefetch_start(vx, (size_t)nrc_x*bx);
+        }
 #ifdef __aarch64__
         constexpr int k_x_step = 64; //8192; // Tiling does not seem to help on my M2 Max (but difference to tiling is small)
 #else
@@ -893,6 +902,116 @@ inline uint32_t simple_gcd(uint32_t a, uint32_t b) {
     }
     return a;
 }
+}
+
+namespace {
+
+// The units a thread has left of one matrix: [next, end), packed so that one compare-and-swap takes units from
+// either side. The owner takes from the front, the others from the back.
+struct ShareSlot {
+    std::atomic<uint64_t> range;
+    char pad[IQK_SHARE_SLOT_SIZE - sizeof(std::atomic<uint64_t>)];
+};
+static_assert(sizeof(ShareSlot) == IQK_SHARE_SLOT_SIZE, "IQK_SHARE_SLOT_SIZE");
+
+inline uint64_t share_range(uint32_t next, uint32_t end) { return (uint64_t)next << 32 | end; }
+
+// Rows per unit, or 0 if the product is not shared this way: only the products that go straight to the kernel
+// of a row-interleaved type, for a few tokens, where the memory sets the speed, and with enough weights per
+// thread (256 kB, some 20 us of reading) for the bookkeeping not to count.
+int share_unit_rows(long Nx, long Ny, int typeA, int typeB, long strideA, int nth) {
+    if (nth < 2 || Ny > 8) return 0;
+    if ((size_t)Nx*strideA < (size_t)nth*256*1024) return 0;
+    const auto etypeA = ggml_type(typeA);
+    if (etypeA == GGML_TYPE_F8_E4M3_KS || is_f8_q80(typeA, typeB)) return 0;
+    if (MulMat::is_dequant_better(etypeA, Ny) != etypeA) return 0;
+    // one token is computed group by group; several tokens take the units the kernels prefer
+    const int rows = Ny == 1 ? split_rows(etypeA, Ny) : MulMat::num_rows(etypeA);
+    if (rows < 4 || Nx%rows != 0 || Nx/rows < 4*(long)nth || Nx/rows > INT32_MAX) return 0;
+    return rows;
+}
+
+}
+
+extern "C" IQK_API bool iqk_mul_mat_share_init(void * vslots, long Nx, long Ny, long ne00, int typeA, long strideA, int typeB, int ith, int nth) {
+    auto & mine = ((ShareSlot *)vslots)[ith].range;
+    const int rows = share_unit_rows(Nx, Ny, typeA, typeB, strideA, nth);
+    MulMat mm;
+    if (!rows || !MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+        mine.store(0, std::memory_order_release);
+        return false;
+    }
+    int first, n;
+    split_units(Nx/rows, ith, nth, first, n);
+    mine.store(share_range(first, first + n), std::memory_order_release);
+    return true;
+}
+
+extern "C" IQK_API bool iqk_mul_mat_share_run(void * vslots, int steal, long Nx, long Ny, long ne00,
+        int typeA, const void * A, long strideA,
+        int typeB, const void * B, long strideB,
+        float * C, long stride_C, int ith, int nth) {
+    auto slots = (ShareSlot *)vslots;
+    const int rows = share_unit_rows(Nx, Ny, typeA, typeB, strideA, nth);
+    if (!rows) {
+        return false;
+    }
+    // the kernels are looked up when there are rows to compute: a thread that finds none to take needs none
+    MulMat mm;
+    bool prepared = false;
+    // A thread takes about 128 kB of weights at a time from its own rows, 10 us of reading: few enough calls to
+    // read on without a pause, and what the others can no longer take from it is small. Half of that when it
+    // takes from another thread, so that the threads end within a few us of each other.
+    constexpr size_t k_take_bytes = 128*1024;
+    const uint32_t take_own   = std::max<size_t>(1, std::min<size_t>(64, k_take_bytes/((size_t)rows*strideA)));
+    const uint32_t take_other = std::max<uint32_t>(1, take_own/2);
+
+    auto compute = [&] (uint32_t first, uint32_t last) {
+        if (!prepared) {
+            if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+                GGML_ABORT("fatal error"); // iqk_mul_mat_share_init() found the kernels
+            }
+            prepared = true;
+        }
+        const long first_x = (long)first*rows;
+        DataInfo info{C + first_x, (const char *)B, (size_t)stride_C, (size_t)strideB, 0, 1, nullptr, 0};
+        mm.mul_mat_NxM(ne00, (const char *)A + strideA*first_x, strideA, info, (int)(last - first)*rows, Ny);
+    };
+
+    if (!steal) {
+        auto & mine = slots[ith].range;
+        uint64_t r = mine.load(std::memory_order_acquire);
+        // the weights are prefetched up to the end of the rows the thread starts with, taken by others or not
+        mm.run_end = (const char *)A + strideA*(long)rows*(uint32_t)r;
+        for (;;) {
+            const uint32_t next = r >> 32, end = (uint32_t)r;
+            if (next >= end) break;
+            const uint32_t n = std::min(take_own, end - next);
+            if (!mine.compare_exchange_weak(r, share_range(next + n, end), std::memory_order_acq_rel, std::memory_order_acquire)) {
+                continue; // another thread took units from the end: r is the new range
+            }
+            compute(next, next + n);
+            mm.run_goes_on = true;
+            r = mine.load(std::memory_order_acquire);
+        }
+        return true;
+    }
+
+    for (int k = 1; k < nth; ++k) {
+        auto & theirs = slots[(ith + k)%nth].range;
+        uint64_t r = theirs.load(std::memory_order_acquire);
+        for (;;) {
+            const uint32_t next = r >> 32, end = (uint32_t)r;
+            if (next >= end) break;
+            const uint32_t n = std::min(take_other, end - next);
+            if (!theirs.compare_exchange_weak(r, share_range(next, end - n), std::memory_order_acq_rel, std::memory_order_acquire)) {
+                continue;
+            }
+            compute(end - n, end);
+            r = theirs.load(std::memory_order_acquire);
+        }
+    }
+    return true;
 }
 
 extern "C" IQK_API bool iqk_mul_mat_4d(long Nx, long Ny, long ne00,
@@ -2814,6 +2933,14 @@ extern "C" IQK_API bool iqk_mul_mat_4d(long /*Nx*/, long /*Ny*/, long /*ne00*/,
         int /*typeB*/, const void * /*B*/, long /*strideB*/,
         float * /*C*/, long /*stride_C*/, int /*ith*/, int /*nth*/) {
     GGML_ABORT("Unsupported CPU. You may need to manually set compilation flags\n");
+    return false;
+}
+
+extern "C" IQK_API bool iqk_mul_mat_share_init(void *, long, long, long, int, long, int, int, int) {
+    return false;
+}
+
+extern "C" IQK_API bool iqk_mul_mat_share_run(void *, int, long, long, long, int, const void *, long, int, const void *, long, float *, long, int, int) {
     return false;
 }
 
