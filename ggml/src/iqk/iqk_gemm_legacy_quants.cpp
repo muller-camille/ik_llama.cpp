@@ -2134,10 +2134,12 @@ inline __m256i q8_0_r8_dot_product(const uint8_t * x, const int8_t * y, __m256i 
 }
 template <int nrc_y>
 static void mul_mat_q8_0_r8_q8_2(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
-    if (nrc_x%16 != 0) {
+    // one token is computed 8 rows at a time below: any multiple of 8 goes the same way
+    if (nrc_y > 1 && nrc_x%16 != 0) {
         mul_mat_q8_0_r8_q8_2_avx2<nrc_y>(n, vx, bx, info, nrc_x);
         return;
     }
+    GGML_ASSERT(nrc_x%8 == 0);
     Q8<nrc_y, block_q8_2_x4> q8(info);
     int nb = n / QK8_0;
     const int pf_dist = iqk_prefetch_distance();

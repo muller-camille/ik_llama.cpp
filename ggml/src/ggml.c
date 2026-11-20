@@ -19612,18 +19612,23 @@ static void ggml_compute_forward_mul_mat_id(
         const void * wdata_mm    = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size_mm = ggml_row_size(vec_dot_type, ne10);
 
-        const int chunks_per_expert = MAX(1, MIN(nth, (int)(ne01 / 32)));
+        // Two chunks per thread and expert: a thread that is done with its chunks waits for the others, half a
+        // chunk on average. Smaller chunks make that wait shorter, each one starts a new run of weights though.
+        const int chunks_per_expert = MAX(1, MIN(2*nth, (int)(ne01 / 16)));
 
         int total_chunks = 0;
         for (int a = 0; a < n_as; a++) {
             if (matrix_row_counts[a] > 0) total_chunks += chunks_per_expert;
         }
 
+        int last_a = 0;
+        int last_acc = 0;
         int chunk_id = ith;
         while (chunk_id < total_chunks) {
-            // Map global chunk_id to (expert_index, local_chunk_index)
-            int acc = 0, cur_a = -1, local_chunk = 0;
-            for (int a = 0; a < n_as; a++) {
+            // Map global chunk_id to (expert_index, local_chunk_index). The chunks of a thread come in rising
+            // order: go on from the expert of the last one.
+            int acc = last_acc, cur_a = -1, local_chunk = 0;
+            for (int a = last_a; a < n_as; a++) {
                 if (matrix_row_counts[a] == 0) continue;
                 if (chunk_id < acc + chunks_per_expert) {
                     cur_a = a;
@@ -19632,6 +19637,11 @@ static void ggml_compute_forward_mul_mat_id(
                 }
                 acc += chunks_per_expert;
             }
+            if (cur_a < 0) {
+                return;
+            }
+            last_a = cur_a;
+            last_acc = acc;
 
             const char * src0_cur = (const char *) ggml_numa_local(src0->data, ith) + cur_a*nb02;
 
@@ -19949,7 +19959,8 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
     const size_t row_size_ug = ggml_row_size(vec_dot_type, ne10);
     const int64_t nr0_base = src0_2 ? ne01 : ne01/2;
 
-    const int chunks_per_expert_ug = MAX(1, MIN(nth, (int)(nr0_base / 32)));
+    // two chunks per thread and expert, see ggml_compute_forward_mul_mat_id
+    const int chunks_per_expert_ug = MAX(1, MIN(2*nth, (int)(nr0_base / 16)));
 
     int total_chunks_ug = 0;
     for (int a = 0; a < n_as; a++) {
