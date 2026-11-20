@@ -128,6 +128,12 @@ llama_test(test-ngram-cache)
 llama_build(test-mamba2.cpp)
 llama_test(test-mamba2)
 
+llama_build(test-numa-mirror.cpp)
+llama_test(test-numa-mirror)
+
+llama_build(test-flash-attn-threads.cpp)
+llama_test(test-flash-attn-threads)
+
 # build test-tokenizer-0 target once and add many tests
 add_executable(test-tokenizer-0 test-tokenizer-0.cpp)
 target_link_libraries(test-tokenizer-0 PRIVATE common)

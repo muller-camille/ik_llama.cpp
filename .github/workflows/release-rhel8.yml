@@ -253,6 +253,17 @@ jobs:
           ./llama-server -m UD-Q4_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf \\
               --ngram-file engram/DeepSeek-V4.1-Flash-1017-engram-Q6_K.gguf_file --jinja --swa-compress
           \`\`\`
+
+          On a machine with several sockets and enough RAM, keep one copy of the weight shards per NUMA node, each on a tmpfs bound to its node, and pass the extra copies with \`--numa-mirror\`. Every thread then reads the weights from its own node. The table shard can stay shared:
+
+          \`\`\`
+          mount -t tmpfs -o size=285G,huge=always,mpol=bind:0 tmpfs /mnt/ds0
+          mount -t tmpfs -o size=285G,huge=always,mpol=bind:1 tmpfs /mnt/ds1
+          # shards 1-7 and 9 in both directories, shard 8 (the table) linked into /mnt/ds0
+          ./llama-server -m /mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf --numa-mirror /mnt/ds1 --jinja --swa-compress
+          \`\`\`
+
+          The log tells which node holds each copy. \`--numa-mirror\` needs the weights mapped from the files, so it does not work with \`-rtr\`: repack the files once with \`llama-quantize --repack --keep-split\` instead.
           EOF
 
           ARGS=()

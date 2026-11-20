@@ -234,6 +234,34 @@ static inline bool are_kv_types_supported(ggml_type type_k, ggml_type type_v) {
     return it_k != supported.end() && it_v != supported.end();
 }
 
+// Whether iqk_flash_attn_impl has a kernel for these head sizes and cache types. The kernel dispatch itself is
+// asked, with one query row over 32 empty cache rows, and the answer is remembered per thread.
+static bool fa_kernel_available(int type_k, int type_v, int Dk, int Dv) {
+    struct entry { int type_k, type_v, Dk, Dv; bool ok; };
+    constexpr int k_max = 8;
+    static thread_local entry cache[k_max];
+    static thread_local int   n_cache = 0;
+    for (int i = 0; i < std::min(n_cache, k_max); ++i) {
+        const auto & e = cache[i];
+        if (e.type_k == type_k && e.type_v == type_v && e.Dk == Dk && e.Dv == Dv) return e.ok;
+    }
+    bool ok = false;
+    const auto tk = ggml_type(type_k), tv = ggml_type(type_v);
+    if (Dk > 0 && Dv > 0 && Dk % ggml_blck_size(tk) == 0 && Dv % ggml_blck_size(tv) == 0) {
+        constexpr int nk = 32;
+        const size_t row_k = ggml_row_size(tk, Dk), row_v = ggml_row_size(tv, Dv);
+        // rows of zeros are valid data for every cache type
+        std::vector<char> k(nk*row_k + 128, 0), v(nk*row_v + 128, 0), q(Dk*sizeof(float) + 128, 0), qkv(Dv*sizeof(float) + 128, 0);
+        std::vector<uint16_t> mask(nk, 0);
+        auto aligned = [] (std::vector<char> & buf) { return buf.data() + (64 - (uintptr_t(buf.data()) & 63)); };
+        ok = iqk_flash_attn_impl(type_k, type_v, Dk, Dv, 1, nk, Dk*sizeof(float), row_k, row_v, 0, Dv,
+                (const float *)aligned(q), aligned(k), aligned(v), mask.data(), nullptr, 0, 1.0f, 0.0f,
+                (float *)aligned(qkv), nullptr, nullptr);
+    }
+    cache[n_cache++ % k_max] = { type_k, type_v, Dk, Dv, ok };
+    return ok;
+}
+
 // TODO: get the ggml_type enum here without pollution
 //
 extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float max_bias,
@@ -263,6 +291,13 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
                             int ith, int nth, int n_swa, [[maybe_unused]] ggml_tensor * indexer) {
 
     if (type_q != 0 || type_mask != 1 || max_bias > 0) return false;
+
+    // All threads have to give the same answer. When some return false, the caller runs the generic implementation
+    // in those threads only, each for its own share of the rows, and a thread that had nothing to compute here and
+    // returned true leaves its share uncomputed (or the others waiting at a barrier). So decide what the kernels
+    // cannot do before the work is split. An unsupported K/V type combination is reported further down.
+    if (are_kv_types_supported(ggml_type(int_type_k_in), ggml_type(int_type_v)) &&
+        !fa_kernel_available(int_type_k_in, int_type_v, Dk, Dv)) return false;
 
     if (indexer && indexer->type == GGML_TYPE_I32) {
         // an unsupported K/V type must reach the abort below, as without the indexer, not the generic indexer path
@@ -471,6 +506,9 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
             nek1 = last_k - first_k;
         }
     }
+
+    // the kernels need a mask and whole blocks of 32 cache rows: also decided here, the same for every thread
+    if (!mask || nek1%32 != 0) return false;
 
     int int_type_k = int_type_k_in;
     auto work_buffer = work_buffer_in;

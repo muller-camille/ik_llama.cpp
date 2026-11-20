@@ -5344,6 +5344,88 @@ bool ggml_is_numa(void) {
     return g_state.numa.n_nodes > 1;
 }
 
+//
+// NUMA mirror: extra read-only copies of weight memory, one per NUMA node
+//
+
+#define GGML_NUMA_MIRROR_MAX_RANGES 1024
+
+struct ggml_numa_mirror_range {
+    const char * begin;
+    const char * end;
+    const char * copies[GGML_NUMA_MAX_NODES]; // copies[0] == begin
+    atomic_int   n_copies;                    // 0: removed
+};
+
+// a slot is filled before g_numa_mirror_n covers it and is never reused, so computing threads read it without a lock
+static struct ggml_numa_mirror_range g_numa_mirror[GGML_NUMA_MIRROR_MAX_RANGES];
+static atomic_int g_numa_mirror_n;    // slots handed out
+static atomic_int g_numa_mirror_live; // slots with copies
+
+bool ggml_numa_mirror_add(const void * addr, size_t size, const void * copy) {
+    bool ok = false;
+    ggml_critical_section_start();
+    const int n = atomic_load(&g_numa_mirror_n);
+    struct ggml_numa_mirror_range * r = NULL;
+    for (int i = 0; i < n && !r; ++i) {
+        if (atomic_load(&g_numa_mirror[i].n_copies) > 0 && g_numa_mirror[i].begin == (const char *) addr) {
+            r = &g_numa_mirror[i];
+        }
+    }
+    if (r) {
+        const int n_copies = atomic_load(&r->n_copies);
+        if (n_copies < GGML_NUMA_MAX_NODES && r->end == r->begin + size) {
+            r->copies[n_copies] = (const char *) copy;
+            atomic_store(&r->n_copies, n_copies + 1);
+            ok = true;
+        }
+    } else if (n < GGML_NUMA_MIRROR_MAX_RANGES && addr && copy && size > 0) {
+        r = &g_numa_mirror[n];
+        r->begin     = (const char *) addr;
+        r->end       = r->begin + size;
+        r->copies[0] = r->begin;
+        r->copies[1] = (const char *) copy;
+        atomic_store(&r->n_copies, 2);
+        atomic_store(&g_numa_mirror_n, n + 1);
+        atomic_fetch_add(&g_numa_mirror_live, 1);
+        ok = true;
+    }
+    ggml_critical_section_end();
+    return ok;
+}
+
+void ggml_numa_mirror_remove(const void * addr) {
+    ggml_critical_section_start();
+    const int n = atomic_load(&g_numa_mirror_n);
+    for (int i = 0; i < n; ++i) {
+        if (atomic_load(&g_numa_mirror[i].n_copies) > 0 && g_numa_mirror[i].begin == (const char *) addr) {
+            atomic_store(&g_numa_mirror[i].n_copies, 0);
+            atomic_fetch_sub(&g_numa_mirror_live, 1);
+        }
+    }
+    ggml_critical_section_end();
+}
+
+static const void * ggml_numa_mirror_find(const void * data, int ith) {
+    const char * p = (const char *) data;
+    const int n = atomic_load(&g_numa_mirror_n);
+    for (int i = 0; i < n; ++i) {
+        const struct ggml_numa_mirror_range * r = &g_numa_mirror[i];
+        if (p >= r->begin && p < r->end) {
+            const int n_copies = atomic_load((atomic_int *) &r->n_copies);
+            if (n_copies > 1) {
+                return r->copies[ith % n_copies] + (p - r->begin);
+            }
+        }
+    }
+    return data;
+}
+
+// the copy of weight memory that thread ith reads: GGML_NUMA_STRATEGY_DISTRIBUTE pins thread ith to node ith % n_nodes
+static inline const void * ggml_numa_local(const void * data, int ith) {
+    return atomic_load(&g_numa_mirror_live) > 0 ? ggml_numa_mirror_find(data, ith) : data;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 void ggml_print_object(const struct ggml_object * obj) {
@@ -19098,7 +19180,7 @@ static int ggml_compute_forward_mul_mat(
     if (dst->type == GGML_TYPE_F32 && (src1->type == vec_dot_type || vec_dot_type == type_traits[type].vec_dot_type)) {
         if (iqk_mul_mat_4d(ne01, ne11, ne00,
                     ne02, ne03, ne12, ne13, nb02, nb03, nb12, nb13, nb2/sizeof(float), nb3/sizeof(float),
-                    src0->type, src0->data, nb01,
+                    src0->type, ggml_numa_local(src0->data, ith), nb01,
                     src1->type, src1->data, nb11,
                     (float *)dst->data, nb1/sizeof(float), ith, nth)) return node_n;
     }
@@ -19169,7 +19251,7 @@ static int ggml_compute_forward_mul_mat(
         if (iqk_mul_mat_4d(ne01, ne11, ne00,
                     ne02, ne03, ne12, ne13, nb02, nb03, row_size*ne11, row_size*ne11*ne12,
                     nb2/sizeof(float), nb3/sizeof(float),
-                    src0->type, src0->data, nb01,
+                    src0->type, ggml_numa_local(src0->data, ith), nb01,
                     vec_dot_type, wdata, row_size,
                     (float *)dst->data, nb1/sizeof(float), ith, nth)) {
             if (!cgraph || type == GGML_TYPE_F8_E4M3_KS) return node_n;
@@ -19186,7 +19268,7 @@ static int ggml_compute_forward_mul_mat(
                 if (!iqk_mul_mat_4d(src0_next->ne[1], ne11, ne00,
                     src0_next->ne[2], src0_next->ne[3], ne12, ne13, src0_next->nb[2], src0_next->nb[3], row_size*ne11, row_size*ne11*ne12,
                     dst_next->nb[2]/sizeof(float), dst_next->nb[3]/sizeof(float),
-                    src0_next->type, src0_next->data, src0_next->nb[1],
+                    src0_next->type, ggml_numa_local(src0_next->data, ith), src0_next->nb[1],
                     vec_dot_type, wdata, row_size,
                     (float *)dst_next->data, dst_next->nb[1]/sizeof(float), ith, nth)) break;
                 ++node_n;
@@ -19435,7 +19517,7 @@ static void ggml_compute_forward_mul_mat_id(
                 acc += chunks_per_expert;
             }
 
-            const char * src0_cur = (const char *) src0->data + cur_a*nb02;
+            const char * src0_cur = (const char *) ggml_numa_local(src0->data, ith) + cur_a*nb02;
 
             if (!iqk_mul_mat_moe(ne01, matrix_row_counts[cur_a], ne00, ne11,
                         src0->type, src0_cur, nb01,
@@ -19465,7 +19547,7 @@ IQK_MulMat_Not_Available0:;
             continue;
         }
 
-        const char * src0_cur = (const char *) src0->data + cur_a*nb02;
+        const char * src0_cur = (const char *) ggml_numa_local(src0->data, ith) + cur_a*nb02;
 
         const void * wdata    = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
@@ -19780,12 +19862,12 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
 
         const char *src0_1_cur, *src0_2_cur, *up_b_cur = NULL, *gate_b_cur = NULL;
         if (src0_2) {
-            src0_1_cur = (const char *) src0_1->data + cur_a*nb02;
-            src0_2_cur = (const char *) src0_2->data + cur_a*nb02;
+            src0_1_cur = (const char *) ggml_numa_local(src0_1->data, ith) + cur_a*nb02;
+            src0_2_cur = (const char *) ggml_numa_local(src0_2->data, ith) + cur_a*nb02;
             up_b_cur   = up_b   ? (const char *)up_b->data + cur_a*nb41 : NULL;
             gate_b_cur = gate_b ? (const char *)gate_b->data + cur_a*nb51 : NULL;
         } else {
-            src0_2_cur = (const char *) src0_1->data + cur_a*nb02;
+            src0_2_cur = (const char *) ggml_numa_local(src0_1->data, ith) + cur_a*nb02;
             src0_1_cur = src0_2_cur + nb02/2;
             if (up_b) {
                 GGML_ASSERT(!gate_b);
@@ -19824,12 +19906,12 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
 
         const char *src0_1_cur, *src0_2_cur, *up_b_cur = NULL, *gate_b_cur = NULL;
         if (src0_2) {
-            src0_1_cur = (const char *) src0_1->data + cur_a*nb02;
-            src0_2_cur = (const char *) src0_2->data + cur_a*nb02;
+            src0_1_cur = (const char *) ggml_numa_local(src0_1->data, ith) + cur_a*nb02;
+            src0_2_cur = (const char *) ggml_numa_local(src0_2->data, ith) + cur_a*nb02;
             up_b_cur   = up_b   ? (const char *)up_b->data + cur_a*nb41 : NULL;
             gate_b_cur = gate_b ? (const char *)gate_b->data + cur_a*nb51 : NULL;
         } else {
-            src0_2_cur = (const char *) src0_1->data + cur_a*nb02;
+            src0_2_cur = (const char *) ggml_numa_local(src0_1->data, ith) + cur_a*nb02;
             src0_1_cur = src0_2_cur + nb02/2;
             if (up_b) {
                 GGML_ASSERT(!gate_b);
@@ -19925,7 +20007,7 @@ static void ggml_compute_forward_mul_mat_up_gate(
     const size_t row_size = ggml_row_size(vec_dot_type, ne10);
 
     if (!iqk_moe_fused_up_gate(ne01, ne11, ne00, ne11, dst->op_params[0],
-                         type, src0_1->data, src0_2->data, nb01,
+                         type, ggml_numa_local(src0_1->data, ith), ggml_numa_local(src0_2->data, ith), nb01,
                          vec_dot_type, (const char *)wdata, row_size,
                          NULL, NULL,
                          (float *)dst->data, nb1, nb2,
