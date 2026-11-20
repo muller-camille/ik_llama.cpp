@@ -358,6 +358,21 @@ static bool is_repack_forbidden(const char * tensor_name) {
     return is_repack_forbidden(name);
 }
 
+// the type that the first matching --custom-q rule gives to a tensor, GGML_TYPE_COUNT if no rule matches
+static ggml_type llama_custom_q_type(const llama_model_quantize_params * params, const std::string & name) {
+    if (params->custom_quants) {
+        using CustomQ = std::pair<std::string, ggml_type>;
+        auto& q_rules = *static_cast<const std::vector<CustomQ>*>(params->custom_quants);
+        for (auto& rule : q_rules) {
+            std::regex pattern(rule.first);
+            if (std::regex_search(name, pattern)) {
+                return rule.second;
+            }
+        }
+    }
+    return GGML_TYPE_COUNT;
+}
+
 static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
     const std::string name = ggml_get_name(tensor);
 
@@ -385,18 +400,7 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
         return i_layer < n_layers/8 || i_layer >= 7*n_layers/8 || (i_layer - n_layers/8)%3 == 2;
     };
 
-    auto custom_type = GGML_TYPE_COUNT;
-    if (qs.params->custom_quants) {
-        using CustomQ = std::pair<std::string, ggml_type>;
-        auto& q_rules = *static_cast<const std::vector<CustomQ>*>(qs.params->custom_quants);
-        for (auto& rule : q_rules) {
-            std::regex pattern(rule.first);
-            if (std::regex_search(name, pattern)) {
-                custom_type = rule.second;
-                break;
-            }
-        }
-    }
+    const auto custom_type = llama_custom_q_type(qs.params, name);
 
     //auto get_layer = [] (const char * name) {
     //    int il;
@@ -1460,7 +1464,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         default: throw std::runtime_error(format("invalid output file type %d\n", ftype));
     }
 
-    if (params->custom_quants && !ggml_is_quantized(default_type)) {
+    if (params->custom_quants && params->only_copy) {
+        LLAMA_LOG_INFO("%s: COPY with --custom-q: every tensor is copied, except the ones a rule names\n", __func__);
+    } else if (params->custom_quants && !ggml_is_quantized(default_type)) {
         LLAMA_LOG_WARN("%s: ignoring --custom-q rules because default type %s is not quantized\n",
                 __func__, ggml_type_name(default_type));
     }
@@ -1731,7 +1737,10 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         quantize &= name.find("_norm.weight") == std::string::npos;
 
         quantize &= params->quantize_output_tensor || name != "output.weight";
-        quantize &= !params->only_copy;
+        // COPY copies every tensor. With --custom-q it copies every tensor but the ones a rule names: those
+        // get the type of their rule, and nothing else can change.
+        const ggml_type copy_custom_type = params->only_copy ? llama_custom_q_type(params, name) : GGML_TYPE_COUNT;
+        quantize &= !params->only_copy || copy_custom_type < GGML_TYPE_COUNT;
 
         // do not quantize expert gating tensors
         // NOTE: can't use LLM_TN here because the layer number is not known
@@ -1772,7 +1781,11 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             new_type = default_type;
 
             // get more optimal quantization type based on the tensor shape, layer, etc.
-            if (params->pure) {
+            if (copy_custom_type < GGML_TYPE_COUNT) {
+                new_type = copy_custom_type;
+                LLAMA_LOG_INFO("Using custom type %s for tensor %s\n", ggml_type_name(new_type), name.c_str());
+            }
+            else if (params->pure) {
                 auto working_type = change_type_if_necessary(new_type, tensor->ne[0], tensor->ne[1], false);
                 if (working_type != new_type) {
                     ++qs.n_fallback;

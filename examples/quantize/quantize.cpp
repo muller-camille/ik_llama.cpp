@@ -183,7 +183,8 @@ static void usage(const char * executable) {
     printf("  --per-layer-token-embedding-type ggml_type: use this ggml_type for all per-layer token_embd.weight tensors.\n\n");
     printf("  --extra-output-tensor ggml_type: requantize and add output tensor of that type.\n");
     printf("  --ffn-gate-inp-type ggml_type: use this ggml_type for the ffn_gate_inp tensors.\n\n");
-    printf("  --custom-q regex1=type1,regex2=type2...: use this to specify custom quantization type rules.\n\n");
+    printf("  --custom-q regex1=type1,regex2=type2...: use this to specify custom quantization type rules.\n");
+    printf("      With the type COPY, every tensor is copied except the ones a rule names: only those are requantized.\n\n");
     printf("  --repack Repack all tensors to the corresponding _r4/8 variant if available.\n\n");
     printf("  --repack-pattern Comma separated list of regexs to use for matching tensor names to be repacked.\n\n");
     printf("  --symmetric-q40  Use [-7:7] range for Q4_0 quantization (turns off imatrix)\n\n");
