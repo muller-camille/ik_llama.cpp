@@ -1504,9 +1504,12 @@ static void mul_mat_q4_k_r4_q8_k(int n, const void * vx, size_t bx, const DataIn
     __m256  acc[nrc_y] = {};
     __m256i isum[nrc_y] = {};
     __m256i qx[4];
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     for (int ix = 0; ix < nrc_x; ix += 4) {
         const block_q4_k_r4 * iq4 = (const block_q4_k_r4 *)((const char *)vx + (ix+0)*bx);
         for (int ibl = 0; ibl < nbl; ++ibl) { // Block of 256
+            iqk_prefetch_ahead((const char *)&iq4[ibl], sizeof(block_q4_k_r4), pf_dist, pf_end);
             auto dl = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)iq4[ibl].d));
             auto d4 = _mm256_set_m128(_mm256_castps256_ps128(dl), _mm256_castps256_ps128(dl));
             auto m4 = _mm256_mul_ps(_mm256_set1_ps(-1.0f), _mm256_set_m128(_mm256_extractf128_ps(dl, 1), _mm256_extractf128_ps(dl, 1)));
@@ -1573,9 +1576,12 @@ static void mul_mat_q5_k_r4_q8_k(int n, const void * vx, size_t bx, const DataIn
     __m256  acc[nrc_y] = {};
     __m256i isum[nrc_y] = {};
     __m256i qx[4];
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     for (int ix = 0; ix < nrc_x; ix += 4) {
         const block_q5_k_r4 * iq5 = (const block_q5_k_r4 *)((const char *)vx + (ix+0)*bx);
         for (int ibl = 0; ibl < nbl; ++ibl) { // Block of 256
+            iqk_prefetch_ahead((const char *)&iq5[ibl], sizeof(block_q5_k_r4), pf_dist, pf_end);
             auto dl = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)iq5[ibl].d));
             auto d4 = _mm256_set_m128(_mm256_castps256_ps128(dl), _mm256_castps256_ps128(dl));
             auto m4 = _mm256_mul_ps(_mm256_set1_ps(-1.0f), _mm256_set_m128(_mm256_extractf128_ps(dl, 1), _mm256_extractf128_ps(dl, 1)));
@@ -1650,9 +1656,12 @@ static void mul_mat_q6_k_r4_q8_k(int n, const void * vx, size_t bx, const DataIn
     int nbl = n / QK_K;
     __m256  acc[nrc_y] = {};
     __m256i qx[4];
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     for (int ix = 0; ix < nrc_x; ix += 4) {
         const block_q6_k_r4 * iq6 = (const block_q6_k_r4 *)((const char *)vx + (ix+0)*bx);
         for (int ibl = 0; ibl < nbl; ++ibl) { // Block of 256
+            iqk_prefetch_ahead((const char *)&iq6[ibl], sizeof(block_q6_k_r4), pf_dist, pf_end);
             auto dl = _mm_cvtph_ps(_mm_loadl_epi64((const __m128i *)iq6[ibl].d));
             auto d4 = _mm256_set_m128(dl, dl);
 #ifndef HAVE_FANCY_SIMD
