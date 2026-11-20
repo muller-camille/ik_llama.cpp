@@ -3311,6 +3311,9 @@ struct ggml_compute_state_shared {
     atomic_int current_chunk; // currently processing chunk during mul_mat, shared between all the threads
 
     enum ggml_status ec;
+
+    struct ggml_prof_group * prof; // the profile to add to, NULL: no timing (see GGML_PROFILE)
+    int64_t prof_t0;               // start of ggml_graph_compute
 };
 
 struct ggml_compute_state {
@@ -30781,6 +30784,333 @@ struct ggml_cplan ggml_graph_plan(const struct ggml_cgraph * cgraph, int n_threa
     return cplan;
 }
 
+//
+// profile of the graph computations
+//
+// With the environment variable GGML_PROFILE=1, a table of the time per kind of node is printed to stderr when
+// the process exits. Every thread times its work on each node and its wait at the barrier that follows.
+// Graphs with the same number of nodes and threads are added up, graphs of one token apart from batches.
+// The first graph of each kind is left out: it warms up the memory.
+//
+
+#define GGML_PROF_MAX_GROUPS 16
+#define GGML_PROF_MAX_LABELS 512
+#define GGML_PROF_LABEL_SIZE 96
+
+struct ggml_prof_time {
+    int64_t work_ns;
+    int64_t wait_ns;
+};
+
+struct ggml_prof_group {
+    int       n_nodes;
+    int       n_threads;
+    bool      single;      // graphs of one token
+    int64_t   n_seen;      // graphs of this kind
+    int64_t   n_graphs;    // graphs that were timed
+    int64_t   n_other;     // graphs with other operations than the first one: not timed
+    int64_t   n_tokens;
+    int64_t   total_ns;    // time in ggml_graph_compute
+    uint16_t * op;         // [n_nodes] operation of each node
+    uint16_t * label;      // [n_nodes] weights of each node, index in g_prof_labels
+    int64_t  * n_run;      // [n_nodes] times the node was computed (a node fused into another one never is)
+    int64_t  * bytes;      // [n_nodes] weight bytes the node had to read
+    int64_t  * start_ns;   // [n_threads] time from the call until the thread started on the graph
+    struct ggml_prof_time * time; // [n_threads][n_nodes]
+};
+
+static struct ggml_prof_group g_prof_groups[GGML_PROF_MAX_GROUPS];
+static int  g_prof_n_groups = 0;
+static char g_prof_labels[GGML_PROF_MAX_LABELS][GGML_PROF_LABEL_SIZE]; // label 0 is empty: no weights
+static int  g_prof_n_labels = 1;
+
+static inline int64_t ggml_prof_ns(void) {
+#if defined(_MSC_VER) || defined(__MINGW32__)
+    return ggml_time_us()*1000;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec*1000000000 + (int64_t)ts.tv_nsec;
+#endif
+}
+
+// the weights a node reads: a named leaf in src[0], or a view of one
+static const struct ggml_tensor * ggml_prof_weights(const struct ggml_tensor * node) {
+    const struct ggml_tensor * w = node->src[0];
+    if (w && w->view_src) {
+        w = w->view_src;
+    }
+    return w && w->op == GGML_OP_NONE && w->name[0] ? w : NULL;
+}
+
+static int64_t ggml_prof_weight_bytes(const struct ggml_tensor * node) {
+    const struct ggml_tensor * w = ggml_prof_weights(node);
+    if (!w) {
+        return 0;
+    }
+    switch (node->op) {
+        case GGML_OP_MUL_MAT:
+            return ggml_nbytes(node->src[0]);
+        case GGML_OP_FUSED_UP_GATE:
+            return ggml_nbytes(w) + (node->src[1] ? ggml_nbytes(node->src[1]) : 0);
+        case GGML_OP_MUL_MAT_ID:
+        case GGML_OP_MOE_FUSED_UP_GATE: {
+            // the experts that the tokens selected, counted as if no two tokens shared one
+            const bool up_gate = node->op == GGML_OP_MOE_FUSED_UP_GATE;
+            const struct ggml_tensor * ids = node->src[up_gate ? 3 : 2];
+            const int64_t n_expert = w->ne[2];
+            const int64_t n_used   = MIN(n_expert, ids->ne[0]*ids->ne[1]);
+            const int64_t bytes    = ggml_nbytes(w) + (up_gate && node->src[1] ? ggml_nbytes(node->src[1]) : 0);
+            return bytes/n_expert*n_used;
+        }
+        default:
+            return 0;
+    }
+}
+
+// The name and type of the weights, or else the name of the node, with a # for every number so that the
+// layers add up: "blk.12.attn_q.weight" of type q8_0 -> "blk.#.attn_q.weight q8_0", "ffn_out-12" -> "ffn_out-#"
+static int ggml_prof_label(const struct ggml_tensor * node) {
+    const struct ggml_tensor * w = ggml_prof_weights(node);
+    char label[GGML_PROF_LABEL_SIZE];
+    int n = 0;
+    for (const char * c = w ? w->name : node->name; *c && n < GGML_PROF_LABEL_SIZE - 24; ++c) {
+        if (*c < '0' || *c > '9') {
+            label[n++] = *c;
+        } else if (n == 0 || label[n-1] != '#') {
+            label[n++] = '#';
+        }
+    }
+    label[n] = 0;
+    if (w) {
+        snprintf(label + n, GGML_PROF_LABEL_SIZE - n, " %.20s", ggml_type_name(w->type));
+    }
+    if (!label[0]) {
+        return 0;
+    }
+    for (int i = 1; i < g_prof_n_labels; ++i) {
+        if (strcmp(g_prof_labels[i], label) == 0) {
+            return i;
+        }
+    }
+    if (g_prof_n_labels == GGML_PROF_MAX_LABELS) {
+        return 0;
+    }
+    strcpy(g_prof_labels[g_prof_n_labels], label);
+    return g_prof_n_labels++;
+}
+
+static void ggml_prof_report(void);
+
+// the profile this graph adds to, NULL if it is not timed
+static struct ggml_prof_group * ggml_prof_begin(const struct ggml_cgraph * cgraph, int n_threads) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_PROFILE");
+        enabled = env && env[0] && strcmp(env, "0") != 0;
+    }
+    if (!enabled || cgraph->n_nodes < 1) {
+        return NULL;
+    }
+    const int  n_nodes = cgraph->n_nodes;
+    const bool single  = cgraph->n_batch <= 1;
+
+    ggml_critical_section_start();
+    struct ggml_prof_group * g = NULL;
+    for (int i = 0; i < g_prof_n_groups && !g; ++i) {
+        struct ggml_prof_group * gi = &g_prof_groups[i];
+        if (gi->n_nodes == n_nodes && gi->n_threads == n_threads && gi->single == single) {
+            g = gi;
+        }
+    }
+    if (!g && g_prof_n_groups < GGML_PROF_MAX_GROUPS) {
+        g = &g_prof_groups[g_prof_n_groups];
+        g->n_nodes   = n_nodes;
+        g->n_threads = n_threads;
+        g->single    = single;
+        g->op        = calloc(n_nodes, sizeof(uint16_t));
+        g->label     = calloc(n_nodes, sizeof(uint16_t));
+        g->n_run     = calloc(n_nodes, sizeof(int64_t));
+        g->bytes     = calloc(n_nodes, sizeof(int64_t));
+        g->start_ns  = calloc(n_threads, sizeof(int64_t));
+        g->time      = calloc((size_t)n_threads*n_nodes, sizeof(struct ggml_prof_time));
+        if (g->op && g->label && g->n_run && g->bytes && g->start_ns && g->time) {
+            for (int i = 0; i < n_nodes; ++i) {
+                g->op[i]    = (uint16_t)cgraph->nodes[i]->op;
+                g->label[i] = (uint16_t)ggml_prof_label(cgraph->nodes[i]);
+            }
+            if (g_prof_n_groups++ == 0) {
+                atexit(ggml_prof_report);
+            }
+        } else {
+            g = NULL;
+        }
+    }
+    const bool first = g && g->n_seen++ == 0;
+    ggml_critical_section_end();
+
+    if (!g || first) {
+        return NULL;
+    }
+    for (int i = 0; i < n_nodes; ++i) {
+        if (cgraph->nodes[i]->op != (enum ggml_op)g->op[i]) {
+            g->n_other++;
+            return NULL;
+        }
+    }
+    return g;
+}
+
+static void ggml_prof_end(struct ggml_prof_group * g, const struct ggml_cgraph * cgraph, int64_t total_ns) {
+    g->n_graphs++;
+    g->n_tokens += cgraph->n_batch;
+    g->total_ns += total_ns;
+}
+
+struct ggml_prof_row {
+    int     op;
+    int     label;
+    int64_t n_run;
+    int64_t bytes;
+    int64_t elapsed_ns; // work and wait of thread 0: all the threads leave the barrier together
+    int64_t work_ns;    // of all the threads
+    int64_t work_even_ns;
+    int64_t work_min_ns;
+    int64_t work_max_ns;
+};
+
+static void ggml_prof_report(void) {
+    bool legend = false;
+    for (int ig = 0; ig < g_prof_n_groups; ++ig) {
+        const struct ggml_prof_group * g = &g_prof_groups[ig];
+        const int n_nodes = g->n_nodes, n_threads = g->n_threads;
+        if (g->n_graphs < 1) {
+            continue;
+        }
+
+        // one row per operation and kind of weights
+        int * row_of = malloc(n_nodes*sizeof(int));
+        struct ggml_prof_row * rows = calloc(n_nodes, sizeof(struct ggml_prof_row));
+        int64_t * work = NULL;                                  // [row][thread]
+        int64_t * thread_work = calloc(n_threads, sizeof(int64_t));
+        int n_rows = 0;
+        if (row_of && rows && thread_work) {
+            for (int i = 0; i < n_nodes; ++i) {
+                row_of[i] = -1;
+                if (g->n_run[i] == 0) {
+                    continue;
+                }
+                int r = 0;
+                while (r < n_rows && (rows[r].op != g->op[i] || rows[r].label != g->label[i])) {
+                    ++r;
+                }
+                if (r == n_rows) {
+                    rows[n_rows].op    = g->op[i];
+                    rows[n_rows].label = g->label[i];
+                    n_rows++;
+                }
+                row_of[i] = r;
+                rows[r].n_run += g->n_run[i];
+                rows[r].bytes += g->bytes[i];
+            }
+            work = calloc((size_t)MAX(1, n_rows)*n_threads, sizeof(int64_t));
+        }
+        if (!work) {
+            free(row_of); free(rows); free(thread_work);
+            continue;
+        }
+        int64_t elapsed_ns = 0;
+        for (int t = 0; t < n_threads; ++t) {
+            for (int i = 0; i < n_nodes; ++i) {
+                const int r = row_of[i];
+                if (r < 0) {
+                    continue;
+                }
+                const struct ggml_prof_time * pt = &g->time[(size_t)t*n_nodes + i];
+                work[(size_t)r*n_threads + t] += pt->work_ns;
+                thread_work[t] += pt->work_ns;
+                if (t == 0) {
+                    rows[r].elapsed_ns += pt->work_ns + pt->wait_ns;
+                    elapsed_ns         += pt->work_ns + pt->wait_ns;
+                }
+            }
+        }
+        for (int r = 0; r < n_rows; ++r) {
+            const int64_t * w = work + (size_t)r*n_threads;
+            rows[r].work_min_ns = rows[r].work_max_ns = w[0];
+            for (int t = 0; t < n_threads; ++t) {
+                rows[r].work_ns += w[t];
+                if (t%2 == 0) rows[r].work_even_ns += w[t];
+                rows[r].work_min_ns = MIN(rows[r].work_min_ns, w[t]);
+                rows[r].work_max_ns = MAX(rows[r].work_max_ns, w[t]);
+            }
+        }
+        // longest first
+        for (int i = 1; i < n_rows; ++i) {
+            const struct ggml_prof_row row = rows[i];
+            int j = i;
+            for (; j > 0 && rows[j-1].elapsed_ns < row.elapsed_ns; --j) {
+                rows[j] = rows[j-1];
+            }
+            rows[j] = row;
+        }
+
+        if (!legend) {
+            legend = true;
+            fprintf(stderr, "\nggml_profile: ms = elapsed time per graph. busy = work time of a thread / elapsed time: all the threads,\n");
+            fprintf(stderr, "ggml_profile: the even ones, the odd ones, the least and the most busy one. GB/s = weight bytes read / elapsed time.\n");
+        }
+        const double n_graphs = (double)g->n_graphs;
+        const double ms       = 1e-6/n_graphs; // ns in total -> ms per graph
+        int64_t start_sum = 0, start_max = 0;
+        for (int t = 0; t < n_threads; ++t) {
+            start_sum += g->start_ns[t];
+            start_max  = MAX(start_max, g->start_ns[t]);
+        }
+        fprintf(stderr, "ggml_profile:\n");
+        fprintf(stderr, "ggml_profile: graphs of %d nodes, %d thread%s, %.1f token(s) per graph: %lld graphs, %.3f ms per graph, %.3f ms in the nodes\n",
+                n_nodes, n_threads, n_threads == 1 ? "" : "s", g->n_tokens/n_graphs, (long long)g->n_graphs, g->total_ns*ms, elapsed_ns*ms);
+        fprintf(stderr, "ggml_profile: a thread starts %.3f ms after the call on average, the last one %.3f ms after it",
+                start_sum*ms/n_threads, start_max*ms);
+        if (g->n_other > 0) {
+            fprintf(stderr, "; %lld graphs with other operations were not timed", (long long)g->n_other);
+        }
+        fprintf(stderr, "\nggml_profile:       ms  share   nodes  busy  even   odd   min   max    GB/s  operation\n");
+        const int n_even = (n_threads + 1)/2, n_odd = n_threads/2;
+        struct ggml_prof_row rest = { 0 };
+        for (int r = 0; r < n_rows; ++r) {
+            const struct ggml_prof_row * row = &rows[r];
+            if (row->elapsed_ns < elapsed_ns/500) { // below 0.2%
+                rest.n_run      += row->n_run;
+                rest.elapsed_ns += row->elapsed_ns;
+                continue;
+            }
+            const double e = (double)MAX(1, row->elapsed_ns);
+            char gbs[16] = "       -";
+            if (row->bytes > 0) {
+                snprintf(gbs, sizeof(gbs), "%8.1f", (double)row->bytes/e);
+            }
+            fprintf(stderr, "ggml_profile: %8.3f %5.1f%% %7.1f %4.0f%% %4.0f%% %4.0f%% %4.0f%% %4.0f%% %s  %s %s\n",
+                    row->elapsed_ns*ms, 100.*row->elapsed_ns/MAX(1, elapsed_ns), row->n_run/n_graphs,
+                    100.*row->work_ns/n_threads/e, 100.*row->work_even_ns/n_even/e,
+                    100.*(row->work_ns - row->work_even_ns)/MAX(1, n_odd)/e,
+                    100.*row->work_min_ns/e, 100.*row->work_max_ns/e, gbs,
+                    ggml_op_name((enum ggml_op)row->op), g_prof_labels[row->label]);
+        }
+        if (rest.n_run > 0) {
+            fprintf(stderr, "ggml_profile: %8.3f %5.1f%% %7.1f %39s other\n",
+                    rest.elapsed_ns*ms, 100.*rest.elapsed_ns/MAX(1, elapsed_ns), rest.n_run/n_graphs, "");
+        }
+        fprintf(stderr, "ggml_profile: busy, thread by thread, in %% of the time in the nodes:");
+        for (int t = 0; t < n_threads; ++t) {
+            fprintf(stderr, "%s%3.0f", t%16 == 0 ? "\nggml_profile:  " : "", 100.*thread_work[t]/MAX(1, elapsed_ns));
+        }
+        fprintf(stderr, "\n");
+
+        free(row_of); free(rows); free(work); free(thread_work);
+    }
+}
+
 static thread_ret_t ggml_graph_compute_thread(void * data) {
     struct ggml_compute_state * state = (struct ggml_compute_state *) data;
 
@@ -30803,10 +31133,21 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
     int64_t t_eval  = 0;
 #endif
 
+    struct ggml_prof_group * prof      = state->shared->prof;
+    struct ggml_prof_time  * prof_time = NULL;
+    int64_t prof_t = 0;
+    if (prof && state->ith < prof->n_threads) {
+        prof_time = prof->time + (size_t)state->ith*prof->n_nodes;
+        prof_t    = ggml_prof_ns();
+        prof->start_ns[state->ith] += prof_t - state->shared->prof_t0;
+    }
+
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
 
         if (ggml_is_noop(node)) continue;
+
+        const int prof_node = node_n; // the call below moves node_n when it computes the next nodes too
 
 #if IK_PRINT_TIMING
         int64_t tim1 = ggml_time_us();
@@ -30821,7 +31162,20 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             state->shared->ec = GGML_STATUS_ABORTED;
         }
 
+        const int64_t prof_t1 = prof_time ? ggml_prof_ns() : 0;
+
         ggml_barrier(state->shared);
+
+        if (prof_time) {
+            const int64_t prof_t2 = ggml_prof_ns();
+            prof_time[prof_node].work_ns += prof_t1 - prof_t;
+            prof_time[prof_node].wait_ns += prof_t2 - prof_t1;
+            prof_t = prof_t2;
+            if (state->ith == 0) {
+                prof->n_run[prof_node]++;
+                prof->bytes[prof_node] += ggml_prof_weight_bytes(node);
+            }
+        }
 
         if (state->shared->ec != GGML_STATUS_SUCCESS) {
             break;
@@ -30861,7 +31215,12 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         /*.abort_callback_data     =*/ NULL,
         /*.current_chunk           =*/ 0,
         /*.ec                      =*/ GGML_STATUS_SUCCESS,
+        /*.prof                    =*/ ggml_prof_begin(cgraph, n_threads),
+        /*.prof_t0                 =*/ 0,
     };
+    if (state_shared.prof) {
+        state_shared.prof_t0 = ggml_prof_ns();
+    }
 
 #ifdef GGML_USE_OPENMP
     if (n_threads > 1) {
@@ -30926,6 +31285,10 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         }
     }
 #endif
+
+    if (state_shared.prof) {
+        ggml_prof_end(state_shared.prof, cgraph, ggml_prof_ns() - state_shared.prof_t0);
+    }
 
     // don't leave affinity set on the main thread
     clear_numa_thread_affinity();
