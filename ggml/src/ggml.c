@@ -31328,8 +31328,10 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             if (state->ith == 0) {
                 atomic_store(&state->shared->serial_node, node_n);
             } else {
+                // Thread 0 is rarely more than some tens of microseconds behind. If it is, it may not be running
+                // at all (more threads than free cores): spinning on would keep it off the core.
                 for (int spin = 0; atomic_load(&state->shared->serial_node) < node_n; ++spin) {
-                    if (spin < 100000) {
+                    if (spin < 1000) {
 #if defined(__SSE3__)
                         _mm_pause();
 #elif defined __ARM_NEON
