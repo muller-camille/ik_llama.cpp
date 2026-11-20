@@ -101,6 +101,7 @@ struct DataInfo {
     int           ne11;
     const mmid_row_mapping * row_mapping = nullptr;
     size_t        bs2 = 0;
+    const char  * x_end = nullptr; // end of the weight rows the thread reads one after the other, see iqk_prefetch_ahead()
 
     inline const char * src1_row(int iy) const {
         if (!row_mapping) return cy + (cur_y + iy)*by;
@@ -140,6 +141,55 @@ struct DataInfo {
 };
 
 typedef void (*mul_mat_t)(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x);
+
+// Prefetching the weights by hand.
+//
+// For a token every weight is read once, from memory. The kernels are faster than the memory: with the weights
+// in the cache, one Sapphire Rapids core at 2.1 GHz computes 52 GB/s of Q8_0_R8 and 21 GB/s of MXFP4_R8, but
+// from memory it gets 10 and 7.5 GB/s, because the hardware prefetcher restarts at every 4k page and does not
+// run far enough ahead. Asking for the bytes iqk_prefetch_distance() ahead of the ones being computed gives
+// 14 and 12.7 GB/s on that core, until the memory itself is the limit.
+//
+// IQK_PREFETCH=<bytes> in the environment sets the distance, IQK_PREFETCH=0 turns the prefetching off.
+int iqk_prefetch_distance();
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#define IQK_PREFETCH_T0(p) _mm_prefetch((const char *)(p), _MM_HINT_T0)
+#else
+#define IQK_PREFETCH_T0(p) __builtin_prefetch((p), 0, 3)
+#endif
+
+// the first bytes of a run of weights, before the kernel starts on it
+static inline void iqk_prefetch_start(const void * vx, size_t size) {
+    const size_t n = std::min<size_t>(size, iqk_prefetch_distance());
+    for (size_t o = 0; o < n; o += 64) {
+        IQK_PREFETCH_T0((const char *)vx + o);
+    }
+}
+
+// the n_bytes that the kernel will read `dist` bytes after p, if they are before the end of the run
+static inline void iqk_prefetch_ahead(const char * p, int n_bytes, int dist, const char * end) {
+    p += dist;
+    if (dist > 0 && p + n_bytes <= end) {
+        for (int o = 0; o < n_bytes; o += 64) {
+            IQK_PREFETCH_T0(p + o);
+        }
+    }
+}
+
+// The same for a kernel that reads two groups of interleaved rows at a time: the bytes that follow a group
+// belong to the other group of the pair, the run of this one goes on `skip` bytes later.
+static inline void iqk_prefetch_ahead(const char * p, int n_bytes, int dist, const char * group_end, size_t skip, const char * end) {
+    p += dist;
+    if (p >= group_end) {
+        p += skip;
+    }
+    if (dist > 0 && p + n_bytes <= end) {
+        for (int o = 0; o < n_bytes; o += 64) {
+            IQK_PREFETCH_T0(p + o);
+        }
+    }
+}
 
 #define IQK_MAX_NY 8
 
