@@ -30781,38 +30781,6 @@ struct ggml_cplan ggml_graph_plan(const struct ggml_cgraph * cgraph, int n_threa
     return cplan;
 }
 
-// A node that one thread computes faster than the threads can be synchronised. Thread 0 computes such a node
-// alone and the threads do not meet at a barrier after it. The other threads skip the node without calling
-// ggml_compute_forward, so only operations qualify that are neither fused with their neighbours there (the next
-// node index must not depend on the node) nor wait at a barrier themselves.
-#define GGML_SERIAL_NODE_MAX_ELEMENTS 65536
-
-static inline bool ggml_node_is_serial(const struct ggml_tensor * node) {
-    switch (node->op) {
-        case GGML_OP_ADD:
-        case GGML_OP_MUL:
-        case GGML_OP_SQRT:
-        case GGML_OP_CLAMP:
-        case GGML_OP_FILL:
-        case GGML_OP_REPEAT:
-        case GGML_OP_CONCAT:
-        case GGML_OP_RMS_NORM:
-        case GGML_OP_FUSED_RMS_NORM:
-        case GGML_OP_MUL_MULTI_ADD:
-        case GGML_OP_ROPE:
-        case GGML_OP_ROPE_BACK:
-        case GGML_OP_HC_PRE:
-        case GGML_OP_HC_POST:
-        case GGML_OP_GET_ROWS:
-            return ggml_nelements(node) <= GGML_SERIAL_NODE_MAX_ELEMENTS;
-        case GGML_OP_SET_ROWS:
-            // the result is the whole destination, the work is the rows that are written
-            return ggml_nelements(node->src[1]) <= GGML_SERIAL_NODE_MAX_ELEMENTS;
-        default:
-            return false;
-    }
-}
-
 static thread_ret_t ggml_graph_compute_thread(void * data) {
     struct ggml_compute_state * state = (struct ggml_compute_state *) data;
 
@@ -30835,34 +30803,10 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
     int64_t t_eval  = 0;
 #endif
 
-    // thread 0 computes the serial nodes as if it were the only thread
-    struct ggml_compute_params params_serial = params;
-    params_serial.nth = 1;
-    // serial nodes were passed since the last barrier: the threads have to meet before the next parallel node
-    bool serial_pending = false;
-
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
 
         if (ggml_is_noop(node)) continue;
-
-        if (params.nth > 1 && ggml_node_is_serial(node)) {
-            if (state->ith == 0) {
-#if IK_PRINT_TIMING
-                int64_t tim1 = ggml_time_us();
-#endif
-                ggml_compute_forward(&params_serial, node, cgraph, node_n);
-#if IK_PRINT_TIMING
-                t_eval += ggml_time_us() - tim1;
-#endif
-            }
-            serial_pending = true;
-            continue;
-        }
-        if (serial_pending) {
-            ggml_barrier(state->shared);
-            serial_pending = false;
-        }
 
 #if IK_PRINT_TIMING
         int64_t tim1 = ggml_time_us();
