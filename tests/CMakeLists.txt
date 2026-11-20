@@ -134,6 +134,9 @@ llama_test(test-numa-mirror)
 llama_build(test-flash-attn-threads.cpp)
 llama_test(test-flash-attn-threads)
 
+llama_build(test-serial-nodes.cpp)
+llama_test(test-serial-nodes)
+
 llama_build(test-small-ops.cpp)
 llama_test(test-small-ops)
 

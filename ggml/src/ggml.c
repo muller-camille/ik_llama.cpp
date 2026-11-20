@@ -3314,6 +3314,13 @@ struct ggml_compute_state_shared {
 
     struct ggml_prof_group * prof; // the profile to add to, NULL: no timing (see GGML_PROFILE)
     int64_t prof_t0;               // start of ggml_graph_compute
+
+    bool serial_nodes;             // thread 0 computes the small nodes alone (see ggml_node_is_serial)
+
+    // Written by thread 0 only and read by all the others: on a cache line of its own.
+    char pad0[64];
+    atomic_int serial_node;        // thread 0 has reached this node: the serial nodes before it are computed
+    char pad1[64];
 };
 
 struct ggml_compute_state {
@@ -31209,6 +31216,57 @@ static void ggml_prof_report(void) {
     }
 }
 
+static bool ggml_serial_nodes_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_SERIAL_NODES");
+        enabled = !(env && strcmp(env, "0") == 0);
+    }
+    return enabled;
+}
+
+// Nodes that thread 0 computes alone. The other threads skip them without meeting at a barrier: with 64 threads
+// on two sockets a barrier costs about 3 us, more than such a node. They only wait, before the next node they
+// take part in, until thread 0 got there (ggml_compute_state_shared.serial_node).
+//
+// A node qualifies if
+//  - ggml_compute_forward neither fuses it with the nodes that follow nor synchronises the threads inside it,
+//    because the other threads do not make the call,
+//  - one thread computes it about as fast as all of them. For most of these operations the threads share the
+//    rows, so with one row (a single token) one thread does all the work anyway.
+// GGML_SERIAL_NODES=0 in the environment turns this off.
+static inline bool ggml_node_is_serial(const struct ggml_tensor * node) {
+    switch (node->op) {
+        case GGML_OP_ADD:
+        case GGML_OP_MUL:
+        case GGML_OP_SQRT:
+        case GGML_OP_CLAMP:
+        case GGML_OP_FILL:
+        case GGML_OP_RMS_NORM:
+        case GGML_OP_FUSED_RMS_NORM:
+            return ggml_nelements(node) <= 32768;
+        case GGML_OP_HC_POST:
+            return ggml_nelements(node) <= 65536;
+        case GGML_OP_MUL_MULTI_ADD:
+        case GGML_OP_REPEAT:
+        case GGML_OP_CONCAT:
+        case GGML_OP_GET_ROWS:
+            return ggml_nelements(node) <= 16384;
+        case GGML_OP_SET_ROWS:
+            // the result is the whole destination, the work is the rows that are written
+            return ggml_nelements(node->src[1]) <= 16384;
+        case GGML_OP_ROPE:
+        case GGML_OP_ROPE_BACK:
+            return ggml_nelements(node) <= 4096;
+        case GGML_OP_HC_PRE:
+            return ggml_nelements(node) <= 1024;
+        case GGML_OP_ARGMAX:
+            return true; // thread 0 only, whatever the size
+        default:
+            return false;
+    }
+}
+
 static thread_ret_t ggml_graph_compute_thread(void * data) {
     struct ggml_compute_state * state = (struct ggml_compute_state *) data;
 
@@ -31240,10 +31298,54 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         prof->start_ns[state->ith] += prof_t - state->shared->prof_t0;
     }
 
+    // thread 0 computes the serial nodes as if it were the only thread
+    const bool serial_nodes = state->shared->serial_nodes && params.nth > 1;
+    struct ggml_compute_params params_serial = params;
+    params_serial.nth = 1;
+    // serial nodes were passed since the last barrier
+    bool serial_pending = false;
+
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
 
         if (ggml_is_noop(node)) continue;
+
+        if (serial_nodes && ggml_node_is_serial(node)) {
+            if (state->ith == 0) {
+                ggml_compute_forward(&params_serial, node, cgraph, node_n);
+                if (prof_time) {
+                    const int64_t t = ggml_prof_ns();
+                    prof_time[node_n].work_ns += t - prof_t;
+                    prof_t = t;
+                    prof->n_run[node_n]++;
+                }
+            }
+            serial_pending = true;
+            continue;
+        }
+        if (serial_pending) {
+            // the other threads start on this node when thread 0 is done with the serial nodes before it
+            if (state->ith == 0) {
+                atomic_store(&state->shared->serial_node, node_n);
+            } else {
+                for (int spin = 0; atomic_load(&state->shared->serial_node) < node_n; ++spin) {
+                    if (spin < 100000) {
+#if defined(__SSE3__)
+                        _mm_pause();
+#elif defined __ARM_NEON
+                        __asm__ __volatile__("isb\n");
+#endif
+                    } else {
+                        sched_yield();
+                    }
+                }
+                if (prof_time) {
+                    // this wait belongs to the serial nodes, which only thread 0 accounts for
+                    prof_t = ggml_prof_ns();
+                }
+            }
+            serial_pending = false;
+        }
 
         const int prof_node = node_n; // the call below moves node_n when it computes the next nodes too
 
@@ -31315,6 +31417,10 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         /*.ec                      =*/ GGML_STATUS_SUCCESS,
         /*.prof                    =*/ ggml_prof_begin(cgraph, n_threads),
         /*.prof_t0                 =*/ 0,
+        /*.serial_nodes            =*/ ggml_serial_nodes_enabled(),
+        /*.pad0                    =*/ { 0 },
+        /*.serial_node             =*/ 0,
+        /*.pad1                    =*/ { 0 },
     };
     if (state_shared.prof) {
         state_shared.prof_t0 = ggml_prof_ns();
