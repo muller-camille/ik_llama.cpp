@@ -134,6 +134,9 @@ llama_test(test-numa-mirror)
 llama_build(test-flash-attn-threads.cpp)
 llama_test(test-flash-attn-threads)
 
+llama_build(test-serial-nodes.cpp)
+llama_test(test-serial-nodes)
+
 # build test-tokenizer-0 target once and add many tests
 add_executable(test-tokenizer-0 test-tokenizer-0.cpp)
 target_link_libraries(test-tokenizer-0 PRIVATE common)
