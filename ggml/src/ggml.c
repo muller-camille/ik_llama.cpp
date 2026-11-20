@@ -3711,6 +3711,47 @@ inline static void ggml_vec_mad_f32_unroll(const int n, const int xs, const int 
 #endif
 }
 
+// Sum of the squares, added up in double precision as the plain loop "sum += (ggml_float)(x[i]*x[i])" does.
+// That loop is one chain of additions, 4 cycles each: 20 us for the 20480 values of a DeepSeek-V4 hc_pre norm.
+// Here 32 (AVX512) or 16 (AVX2) chains run side by side.
+inline static ggml_float ggml_vec_sum_sq_f32(const int64_t n, const float * x) {
+    int64_t i = 0;
+    ggml_float sum = 0.0;
+#if defined(__AVX512F__)
+    __m512d acc0 = _mm512_setzero_pd(), acc1 = _mm512_setzero_pd(), acc2 = _mm512_setzero_pd(), acc3 = _mm512_setzero_pd();
+    for (; i + 31 < n; i += 32) {
+        __m512 v0 = _mm512_loadu_ps(x + i);
+        __m512 v1 = _mm512_loadu_ps(x + i + 16);
+        v0 = _mm512_mul_ps(v0, v0);
+        v1 = _mm512_mul_ps(v1, v1);
+        acc0 = _mm512_add_pd(acc0, _mm512_cvtps_pd(_mm512_castps512_ps256(v0)));
+        acc1 = _mm512_add_pd(acc1, _mm512_cvtps_pd(_mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(v0), 1))));
+        acc2 = _mm512_add_pd(acc2, _mm512_cvtps_pd(_mm512_castps512_ps256(v1)));
+        acc3 = _mm512_add_pd(acc3, _mm512_cvtps_pd(_mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(v1), 1))));
+    }
+    sum = _mm512_reduce_add_pd(_mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3)));
+#elif defined(__AVX2__)
+    __m256d acc0 = _mm256_setzero_pd(), acc1 = _mm256_setzero_pd(), acc2 = _mm256_setzero_pd(), acc3 = _mm256_setzero_pd();
+    for (; i + 15 < n; i += 16) {
+        __m256 v0 = _mm256_loadu_ps(x + i);
+        __m256 v1 = _mm256_loadu_ps(x + i + 8);
+        v0 = _mm256_mul_ps(v0, v0);
+        v1 = _mm256_mul_ps(v1, v1);
+        acc0 = _mm256_add_pd(acc0, _mm256_cvtps_pd(_mm256_castps256_ps128(v0)));
+        acc1 = _mm256_add_pd(acc1, _mm256_cvtps_pd(_mm256_extractf128_ps(v0, 1)));
+        acc2 = _mm256_add_pd(acc2, _mm256_cvtps_pd(_mm256_castps256_ps128(v1)));
+        acc3 = _mm256_add_pd(acc3, _mm256_cvtps_pd(_mm256_extractf128_ps(v1, 1)));
+    }
+    acc0 = _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
+    __m128d lo = _mm_add_pd(_mm256_castpd256_pd128(acc0), _mm256_extractf128_pd(acc0, 1));
+    sum = _mm_cvtsd_f64(_mm_add_sd(lo, _mm_unpackhi_pd(lo, lo)));
+#endif
+    for (; i < n; ++i) {
+        sum += (ggml_float)(x[i] * x[i]);
+    }
+    return sum;
+}
+
 //inline static void ggml_vec_scale_f32(const int n, float * y, const float   v) { for (int i = 0; i < n; ++i) y[i] *= v;          }
 inline static void ggml_vec_scale_f32(const int n, float * y, const float   v) {
 #if defined(GGML_USE_ACCELERATE)
@@ -4748,6 +4789,43 @@ inline static void ggml_vec_norm_inv_f32(const int n, float * s, const float * x
 }
 
 inline static void ggml_vec_argmax_f32(const int n, int * s, const float * x) {
+#if defined(__AVX512F__)
+    // The loop below gives the last position of the largest value. Find the value first, then that position
+    // from the end. With a NaN the loop gives something else: that case is left to it.
+    if (n >= 64) {
+        __m512 vmax0 = _mm512_set1_ps(-INFINITY), vmax1 = vmax0;
+        __mmask16 nan = 0;
+        int i = 0;
+        for (; i + 31 < n; i += 32) {
+            const __m512 v0 = _mm512_loadu_ps(x + i);
+            const __m512 v1 = _mm512_loadu_ps(x + i + 16);
+            nan  |= _mm512_cmp_ps_mask(v0, v1, _CMP_UNORD_Q);
+            vmax0 = _mm512_max_ps(vmax0, v0);
+            vmax1 = _mm512_max_ps(vmax1, v1);
+        }
+        float max = _mm512_reduce_max_ps(_mm512_max_ps(vmax0, vmax1));
+        bool has_nan = nan != 0;
+        for (int j = i; j < n; ++j) {
+            if (x[j] != x[j]) has_nan = true;
+            else if (x[j] > max) max = x[j];
+        }
+        if (!has_nan) {
+            for (int j = n - 1; j >= i; --j) {
+                if (x[j] == max) { *s = j; return; }
+            }
+            const __m512 vmax = _mm512_set1_ps(max);
+            for (int j = i - 16; j >= 0; j -= 16) {
+                const __mmask16 eq = _mm512_cmp_ps_mask(_mm512_loadu_ps(x + j), vmax, _CMP_EQ_OQ);
+                if (eq) {
+                    int k = 15;
+                    while (!((eq >> k) & 1)) --k;
+                    *s = j + k;
+                    return;
+                }
+            }
+        }
+    }
+#endif
     float max = -INFINITY;
     int idx = 0;
     for (int i = 0; i < n; ++i) {
@@ -18626,23 +18704,18 @@ static void ggml_compute_forward_rms_norm_f32(
 
         const float * x = (float *) ((char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
 
-        ggml_float sum = 0.0;
-        for (int64_t i00 = 0; i00 < ne00; i00++) {
-            sum += (ggml_float)(x[i00] * x[i00]);
-        }
+        const ggml_float sum = ggml_vec_sum_sq_f32(ne00, x);
 
         const float mean = sum/ne00;
 
         float * y = (float *) ((char *) dst->data + i01*nb1 + i02*nb2 + i03*nb3);
 
-        memcpy(y, x, ne00 * sizeof(float));
-        // for (int i00 = 0; i00 < ne00; i00++) {
-        //     y[i00] = x[i00];
-        // }
-
         const float scale = 1.0f/sqrtf(mean + eps);
 
-        ggml_vec_scale_f32(ne00, y, scale);
+        // one pass; for the in-place operation x and y are the same row
+        for (int64_t i00 = 0; i00 < ne00; i00++) {
+            y[i00] = x[i00] * scale;
+        }
     }
 }
 
@@ -18707,8 +18780,7 @@ static void ggml_compute_forward_fused_rms_norm_f32(
         const float * c = (const float *)src1->data;
         float * y = (float *)dst->data + ne00_g * first;
         for (int ir = first; ir < last; ++ir) {
-            float sum = 0;
-            for (int j = 0; j < ne00_g; ++j) sum += x[j]*x[j];
+            float sum = ggml_vec_sum_sq_f32(ne00_g, x);
             float mean = sum/ne00_g;
             float scale = 1.0f/sqrtf(mean + eps);
             int ig = ir % ngroups;
@@ -18734,10 +18806,7 @@ static void ggml_compute_forward_fused_rms_norm_f32(
         const float * x = (float *) ((char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
               float * y = (float *) ((char *) dst->data +  i01*nb1  + i02*nb2  + i03*nb3);
 
-        ggml_float sum = 0.0;
-        for (int64_t i00 = 0; i00 < ne00; i00++) {
-            sum += (ggml_float)(x[i00] * x[i00]);
-        }
+        const ggml_float sum = ggml_vec_sum_sq_f32(ne00, x);
         const float mean = sum/ne00;
         const float scale = 1.0f/sqrtf(mean + eps);
         for (int j = 0; j < (int)ne00; ++j) {
@@ -22090,6 +22159,53 @@ static void ggml_rope_cache_init(
     }
 }
 
+// The cos/sin table of a position is the same in every layer of a graph, and every thread of a rope node fills
+// its own: for the 512 dimensions of a DeepSeek-V4 head that is more work than rotating a few rows.
+// Each thread keeps the last tables it made.
+#if defined(_MSC_VER)
+#define GGML_THREAD_LOCAL __declspec(thread)
+#else
+#define GGML_THREAD_LOCAL _Thread_local
+#endif
+
+#define GGML_ROPE_MEMO_SLOTS 4
+#define GGML_ROPE_MEMO_SIZE  1024
+
+struct ggml_rope_memo {
+    bool    used;
+    int64_t p;
+    int64_t ne0;
+    float   par[7]; // freq_scale, corr_dims, ext_factor, mscale, sin_sign, theta_scale
+    float   cache[GGML_ROPE_MEMO_SIZE];
+};
+
+// the table ggml_rope_cache_init would fill, or NULL if this one is not kept
+static const float * ggml_rope_cache_memo(
+     int64_t p, float freq_scale, const float * freq_factors, float corr_dims[2], int64_t ne0, float ext_factor, float mscale,
+     float sin_sign, float theta_scale) {
+    static GGML_THREAD_LOCAL struct ggml_rope_memo memo[GGML_ROPE_MEMO_SLOTS];
+    static GGML_THREAD_LOCAL int next = 0;
+
+    if (freq_factors || ne0 > GGML_ROPE_MEMO_SIZE) {
+        return NULL;
+    }
+    const float par[7] = { freq_scale, corr_dims[0], corr_dims[1], ext_factor, mscale, sin_sign, theta_scale };
+    for (int i = 0; i < GGML_ROPE_MEMO_SLOTS; ++i) {
+        const struct ggml_rope_memo * m = &memo[i];
+        if (m->used && m->p == p && m->ne0 == ne0 && memcmp(m->par, par, sizeof(par)) == 0) {
+            return m->cache;
+        }
+    }
+    struct ggml_rope_memo * m = &memo[next];
+    next = (next + 1) % GGML_ROPE_MEMO_SLOTS;
+    m->used = true;
+    m->p    = p;
+    m->ne0  = ne0;
+    memcpy(m->par, par, sizeof(par));
+    ggml_rope_cache_init(p, freq_scale, NULL, corr_dims, ne0, ext_factor, mscale, m->cache, sin_sign, theta_scale);
+    return m->cache;
+}
+
 static void ggml_mrope_cache_init(
      float theta_base_t, float theta_base_h, float theta_base_w, float theta_base_e, int sections[4], bool is_imrope, bool indep_sects,
      float freq_scale, const float * freq_factors, float corr_dims[2], int64_t ne0, float ext_factor, float mscale,
@@ -22431,10 +22547,16 @@ static void ggml_compute_forward_rope_f32(
                 continue;
             }
 
-            float * cache = (float *) params->wdata + (ne0 + CACHE_LINE_SIZE_F32)*ith;
+            float * cache_buf = (float *) params->wdata + (ne0 + CACHE_LINE_SIZE_F32)*ith;
+            const float * cache = cache_buf;
             if (!is_mrope) {
                 const int64_t p = pos[i2];
-                ggml_rope_cache_init(p, freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache, sin_sign, theta_scale);
+                const float * memo = ggml_rope_cache_memo(p, freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, sin_sign, theta_scale);
+                if (memo) {
+                    cache = memo;
+                } else {
+                    ggml_rope_cache_init(p, freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache_buf, sin_sign, theta_scale);
+                }
             }
             else {
                 const int64_t p_t = pos[i2];
@@ -22443,7 +22565,7 @@ static void ggml_compute_forward_rope_f32(
                 const int64_t p_e = pos[i2 + ne2 * 3];
                 ggml_mrope_cache_init(
                     p_t, p_h, p_w, p_e, sections, is_imrope, is_vision,
-                    freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache, sin_sign, theta_scale);
+                    freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache_buf, sin_sign, theta_scale);
             }
 
             for (int64_t i1 = 0; i1 < ne1; i1++) { // attn-heads
@@ -22641,10 +22763,16 @@ static void ggml_compute_forward_rope_f16(
                 continue;
             }
 
-            float * cache = (float *) params->wdata + (ne0 + CACHE_LINE_SIZE_F32)*ith;
+            float * cache_buf = (float *) params->wdata + (ne0 + CACHE_LINE_SIZE_F32)*ith;
+            const float * cache = cache_buf;
             if (!is_mrope) {
                 const int64_t p = pos[i2];
-                ggml_rope_cache_init(p, freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache, sin_sign, theta_scale);
+                const float * memo = ggml_rope_cache_memo(p, freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, sin_sign, theta_scale);
+                if (memo) {
+                    cache = memo;
+                } else {
+                    ggml_rope_cache_init(p, freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache_buf, sin_sign, theta_scale);
+                }
             }
             else {
                 const int64_t p_t = pos[i2];
@@ -22653,7 +22781,7 @@ static void ggml_compute_forward_rope_f16(
                 const int64_t p_e = pos[i2 + ne2 * 3];
                 ggml_mrope_cache_init(
                     p_t, p_h, p_w, p_e, sections, is_imrope, is_vision,
-                    freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache, sin_sign, theta_scale);
+                    freq_scale, freq_factors, corr_dims, ne0, ext_factor, attn_factor, cache_buf, sin_sign, theta_scale);
             }
 
             for (int64_t i1 = 0; i1 < ne1; i1++) {
@@ -26016,6 +26144,40 @@ static void ggml_compute_forward_hc_pre_f32(
 //build_mhc_post: x = 4096 x 4096 x 1 x 1, post = 4 x 4096 x 1 x 1, residual = 4096 x 4 x 4096 x 1, comb = 4 x 4 x 4096 x 1
 //build_mhc_post: x = 4096 x 1 x 1 x 1,    post = 4 x 1 x 1 x 1,    residual = 4096 x 4 x 1 x 1,    comb = 4 x 4 x 1 x 1
 
+// Elements [first, last) of one token: dst[i] = x*post[i] + sum_j comb[j*S + i]*res[j] for the S streams i.
+// Written so that the compiler vectorizes it: block by block, every output stream is a few multiply-adds over
+// arrays that do not overlap. If the residual is the destination, its block is copied first.
+static void ggml_hc_post_token_f32(int S, int first, int last,
+        const float * x, const float * post, const float * comb,
+        const char * res, size_t res_nb1, char * dst, size_t dst_nb1) {
+    enum { k_block = 128 };
+    float r[8][k_block];
+    const bool in_place = res == dst;
+    for (int i0 = first; i0 < last; i0 += k_block) {
+        const int n = MIN(k_block, last - i0);
+        if (in_place) {
+            for (int j = 0; j < S; ++j) {
+                memcpy(r[j], (const float *)(res + j*res_nb1) + i0, n*sizeof(float));
+            }
+        }
+        for (int i = 0; i < S; ++i) {
+            float * restrict d = (float *)(dst + i*dst_nb1) + i0;
+            const float * restrict xb = x + i0;
+            const float p = post[i];
+            for (int k = 0; k < n; ++k) {
+                d[k] = xb[k] * p;
+            }
+            for (int j = 0; j < S; ++j) {
+                const float c = comb[j*S + i];
+                const float * restrict rj = in_place ? r[j] : (const float *)(res + j*res_nb1) + i0;
+                for (int k = 0; k < n; ++k) {
+                    d[k] += c * rj[k];
+                }
+            }
+        }
+    }
+}
+
 static void ggml_compute_forward_hc_post_f32(
         const struct ggml_compute_params * params,
         struct ggml_tensor * dst) {
@@ -26037,97 +26199,33 @@ static void ggml_compute_forward_hc_post_f32(
     int S = post->ne[0];
     GGML_ASSERT(S <= 8);
 
-    float r[8];
-
     int T = x->ne[1];
-    //const int i0_chunk = 64;
-    //if (T < nth && ne0 > i0_chunk && ne0 % i0_chunk == 0) {
-    //    int ne0_64 = ne0/i0_chunk;
-    //    int nchunk = T*ne0_64;
-    //    int npt = (nchunk + nth - 1)/nth;
-    //    int first = ith * npt;
-    //    int last  = MIN(first + npt, nchunk);
-
-    //    for (int ic = first; ic < last; ++ic) {
-    //        int t = ic / ne0_64;
-    //        int i0_first = ic - t * ne0_64;
-
-    //        const float * x_r    = (const float *)((const char *)x->data + t*x->nb[1]) + i0_first;
-    //        const float * post_r = (const float *)((const char *)post->data + t*post->nb[1]);
-    //        const float * comb_r = (const float *)((const char *)comb->data + t*comb->nb[2]);
-
-    //        for (int i0 = 0; i0 < i0_chunk; ++i0) {
-    //            for (int j = 0; j < S; ++j) {
-    //                const float * res_r  = (const float *)((const char *)res->data + t*res->nb[2] + j*res->nb[1]);
-    //                r[j] = res_r[i0_first + i0];
-    //            }
-    //            for (int i = 0; i < S; ++i) {
-    //                float sum = x_r[i0] * post_r[i];
-    //                for (int j = 0; j < S; ++j) {
-    //                    sum += comb_r[j*S + i] * r[j];
-    //                }
-    //                float * dst_r = (float *)((char *)dst->data + t*dst->nb[2] + i*dst->nb[1]) + i0_first;
-    //                dst_r[i0] = sum;
-    //            }
-    //        }
-    //    }
-    //    return;
-    //}
 
     if (T == 1) {
-        const float * x_r    = (const float *)((const char *)x->data);
-        const float * post_r = (const float *)((const char *)post->data);
-        const float * comb_r = (const float *)((const char *)comb->data);
-
-        // chunks are 64 elements wide (see `first` below); threads stride over chunks
-        int nchunk = (ne0 + 63)/64;
-
-        for (int ic = ith; ic < nchunk; ic += nth) {
-            int first = 64*ic;
-            for (int i0 = first; i0 < first + 64 && i0 < ne0; ++i0) {
-                for (int j = 0; j < S; ++j) {
-                    const float * res_r  = (const float *)((const char *)res->data + j*res->nb[1]);
-                    r[j] = res_r[i0];
-                }
-                for (int i = 0; i < S; ++i) {
-                    float sum = x_r[i0] * post_r[i];
-                    for (int j = 0; j < S; ++j) {
-                        sum += comb_r[j*S + i] * r[j];
-                    }
-                    float * dst_r = (float *)((char *)dst->data + i*dst->nb[1]);
-                    dst_r[i0] = sum;
-                }
-            }
+        // one token: the threads share its elements, in whole blocks of 64
+        const int nblock = (ne0 + 63)/64;
+        const int first  = 64*(int)((int64_t)nblock*ith/nth);
+        const int last   = MIN(ne0, 64*(int)((int64_t)nblock*(ith + 1)/nth));
+        if (first < last) {
+            ggml_hc_post_token_f32(S, first, last, (const float *)x->data, (const float *)post->data, (const float *)comb->data,
+                    (const char *)res->data, res->nb[1], (char *)dst->data, dst->nb[1]);
         }
         return;
     }
 
     int64_t npt = (T + nth - 1)/nth;
 
-    // one token is S*S floats (16 at S=4): parallelize over tokens only
+    // the threads share the tokens
     const int t0 = ith * npt;
     const int t1 = MIN(t0 + npt, T);
 
     for (int64_t t = t0; t < t1; ++t) {
-        const float * x_r    = (const float *)((const char *)x->data + t*x->nb[1]);
-        const float * post_r = (const float *)((const char *)post->data + t*post->nb[1]);
-        const float * comb_r = (const float *)((const char *)comb->data + t*comb->nb[2]);
-
-        for (int i0 = 0; i0 < ne0; ++i0) {
-            for (int j = 0; j < S; ++j) {
-                const float * res_r  = (const float *)((const char *)res->data + t*res->nb[2] + j*res->nb[1]);
-                r[j] = res_r[i0];
-            }
-            for (int i = 0; i < S; ++i) {
-                float sum = x_r[i0] * post_r[i];
-                for (int j = 0; j < S; ++j) {
-                    //sum += comb_r[i*S + j] * r[j];
-                    sum += comb_r[j*S + i] * r[j];
-                }
-                float * dst_r = (float *)((char *)dst->data + t*dst->nb[2] + i*dst->nb[1]);
-                dst_r[i0] = sum;
-            }
-        }
+        ggml_hc_post_token_f32(S, 0, ne0,
+                (const float *)((const char *)x->data + t*x->nb[1]),
+                (const float *)((const char *)post->data + t*post->nb[1]),
+                (const float *)((const char *)comb->data + t*comb->nb[2]),
+                (const char *)res->data + t*res->nb[2], res->nb[1],
+                (char *)dst->data + t*dst->nb[2], dst->nb[1]);
     }
 }
 
