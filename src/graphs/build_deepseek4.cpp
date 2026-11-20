@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -720,6 +721,15 @@ static ggml_tensor * dsv4_build_attn(
     return ggml_cont_2d(ctx, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
 }
 
+// GGML_HC_PROJ=0 in the environment: the separate nodes, as before hc_proj, to compare
+static bool hc_proj_enabled() {
+    static const bool enabled = [] {
+        const char * env = getenv("GGML_HC_PROJ");
+        return !(env && strcmp(env, "0") == 0);
+    }();
+    return enabled;
+}
+
 static ggml_tensor * build_hc_pre(
         ggml_context * ctx0,
         llm_build_context & llm,
@@ -741,10 +751,29 @@ static ggml_tensor * build_hc_pre(
     if (!ggml_is_contiguous(x)) {
         x = ggml_cont(ctx0, x);
     }
-    auto flat = ggml_reshape_2d(ctx0, x, n_embd * hc, nt);
-    auto normed = ggml_rms_norm(ctx0, flat, norm_rms_eps);
-    cb(normed, "hc_pre", il);
-    auto mixes  = ggml_mul_mat(ctx0, hc_fn, normed);
+    ggml_tensor * mixes  = nullptr;
+    ggml_tensor * summed = nullptr; // the streams collapsed with pre_in, when hc_proj computes it too
+    // the threads llama_decode will use for this graph
+    const uint32_t n_threads = nt == 1 ? llm.cparams.n_threads : llm.cparams.n_threads_batch;
+    if (nt <= 8 && n_threads >= 4 && hc_proj_enabled() &&
+        hc_fn->type == GGML_TYPE_F32 && hc_fn->ne[0] == n_embd * hc && hc_fn->ne[1] <= 64 && hc <= 8) {
+        // A few tokens and several threads: one node for the norm, the projection and the collapse, each thread
+        // on its part of x. With one thread, or many tokens, the separate nodes below are as fast or faster.
+        auto proj = ggml_hc_proj(ctx0, hc_fn, x, pre_in, norm_rms_eps);
+        cb(proj, "hc_pre", il);
+        if (pre_in) {
+            const int64_t n_mix = hc_fn->ne[1];
+            mixes  = ggml_view_2d(ctx0, proj, n_mix,  nt, n_mix*sizeof(float),  0);
+            summed = ggml_view_2d(ctx0, proj, n_embd, nt, n_embd*sizeof(float), ggml_hc_proj_sum_offset(n_mix, nt)*sizeof(float));
+        } else {
+            mixes = proj;
+        }
+    } else {
+        auto flat = ggml_reshape_2d(ctx0, x, n_embd * hc, nt);
+        auto normed = ggml_rms_norm(ctx0, flat, norm_rms_eps);
+        cb(normed, "hc_pre", il);
+        mixes  = ggml_mul_mat(ctx0, hc_fn, normed);
+    }
     cb(mixes, "hc_pre_mixes", il);
 
     auto all = ggml_hc_pre(ctx0, mixes, hc_scale, hc_base, hc, hparams.dsv4_hc_sinkhorn_iters, hparams.dsv4_hc_eps, 0.0f);
@@ -759,6 +788,9 @@ static ggml_tensor * build_hc_pre(
         *pre_out = pre;
     }
 
+    if (summed) {
+        return summed;
+    }
     return llm.build_mhc_weighted_sum(x, pre_in ? pre_in : pre, n_embd, hc);
 }
 

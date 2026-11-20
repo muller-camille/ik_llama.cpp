@@ -627,6 +627,22 @@ extern "C" IQK_API int iqk_dequant_type(int type, int Ny) {
     return MulMat::is_dequant_better(ggml_type(type), Ny);
 }
 
+// The rows a thread can be given at once. For Q8_0_R8 MulMat::num_rows() is the 16 that the 512-bit kernels take
+// in pairs of groups, but they accept any multiple of 8. With a few tokens the memory sets the speed, not the
+// kernel, and 8 lets the rows of the smaller matrices go evenly to more threads.
+static inline int split_rows(ggml_type type, [[maybe_unused]] int Ny) {
+#ifdef HAVE_FANCY_SIMD
+    if (type == GGML_TYPE_Q8_0_R8 && Ny <= 16) return 8;
+#endif
+    return MulMat::num_rows(type);
+}
+
+// Units [first, first + n) for thread ith of nth: every unit once, and no thread more than one above another
+static inline void split_units(int64_t nunit, int ith, int nth, int& first, int& n) {
+    first = (int)(nunit*ith/nth);
+    n     = (int)(nunit*(ith + 1)/nth) - first;
+}
+
 template <typename Work>
 static void split_units_and_columns(int nunit, int nrow, int Ny, int max_units, bool split_y, int ith, int nth, const Work& work) {
     constexpr int k_y_blk = 8;
@@ -746,12 +762,11 @@ extern "C" IQK_API bool iqk_mul_mat(long Nx, long Ny, long ne00,
             return false;
         }
         const bool is_float = !mm.func16 && (typeA == GGML_TYPE_F32 || typeA == GGML_TYPE_F16 || typeA == GGML_TYPE_BF16);
-        if (int num_rows = is_float ? 1 : MulMat::num_rows(ggml_type(typeA)); Ny <= 16 && (is_float || (num_rows >= 4 && Nx%num_rows == 0))) {
-            int nunit = Nx/num_rows;
-            int nper  = (nunit + nth - 1)/nth;
-            int first = ith*nper;
-            if (first < nunit) {
-                int nrc_x = num_rows*std::min(nper, nunit - first);
+        if (int num_rows = is_float ? 1 : split_rows(ggml_type(typeA), Ny); Ny <= 16 && (is_float || (num_rows >= 4 && Nx%num_rows == 0))) {
+            int first, nunit;
+            split_units(Nx/num_rows, ith, nth, first, nunit);
+            if (nunit > 0) {
+                int nrc_x = num_rows*nunit;
                 first *= num_rows;
                 DataInfo info{C + first, (const char *)B, (size_t)stride_C, row_size_qy, 0, 1, nullptr, 0};
                 mm.mul_mat_NxM(ne00, (const char *)A + first*row_size_qx, row_size_qx, info, nrc_x, Ny);
@@ -856,9 +871,12 @@ extern "C" IQK_API bool iqk_mul_mat(long Nx, long Ny, long ne00,
         return true;
     }
 
-    auto nrc_x = (Nx/num_rows + nth - 1)/nth;
-    auto first_x = ith*nrc_x;
-    if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+    num_rows = split_rows(ggml_type(typeA), Ny);
+    int first_x, nrc_x;
+    split_units(Nx/num_rows, ith, nth, first_x, nrc_x);
+    if (nrc_x <= 0) {
+        return true;
+    }
 
     DataInfo info{C + first_x*num_rows, (const char *)B, (size_t)stride_C, row_size_qy, 0, 1, nullptr, 0};
 
@@ -1029,11 +1047,13 @@ extern "C" IQK_API bool iqk_mul_mat_moe(long Nx, long Ny, long ne00, int ne11,
     }
     size_t row_size_qx = strideA;
     size_t row_size_qy = strideB;
-    auto num_rows = MulMat::num_rows(ggml_type(typeA));
+    auto num_rows = split_rows(ggml_type(typeA), Ny);
     GGML_ASSERT(Nx%num_rows == 0);
-    auto nrc_x = (Nx/num_rows + nth - 1)/nth;
-    auto first_x = ith*nrc_x;
-    if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+    int first_x, nrc_x;
+    split_units(Nx/num_rows, ith, nth, first_x, nrc_x);
+    if (nrc_x <= 0) {
+        return true;
+    }
     first_x *= num_rows;
     nrc_x *= num_rows;
     DataInfo info{C + first_x, (const char *)B, nb1/sizeof(float),
@@ -1100,11 +1120,13 @@ extern "C" IQK_API bool iqk_moe_fused_up_gate(long Nx, long Ny, long ne00, int n
     if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
         return false;
     }
-    auto num_rows = MulMat::num_rows(ggml_type(typeA));
+    auto num_rows = split_rows(ggml_type(typeA), Ny);
     GGML_ASSERT(Nx%num_rows == 0);
-    auto nrc_x = (Nx/num_rows + nth - 1)/nth;
-    auto first_x = ith*nrc_x;
-    if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+    int first_x, nrc_x;
+    split_units(Nx/num_rows, ith, nth, first_x, nrc_x);
+    if (nrc_x <= 0) {
+        return true;
+    }
     first_x *= num_rows;
     nrc_x *= num_rows;
     DataInfo info{C + first_x, (const char *)B, nb1/sizeof(float),

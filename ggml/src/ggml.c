@@ -5056,9 +5056,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "LATENT_ATTN",
     "DS4_COMP",
     "FMA",
+    "HC_PROJ",
 };
 
-static_assert(GGML_OP_COUNT == 112, "GGML_OP_COUNT != 112");
+static_assert(GGML_OP_COUNT == 113, "GGML_OP_COUNT != 113");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -5186,10 +5187,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "latent_attn_prefix(q,c,pk,pv,mask)",
     "ds4_comp(state, score, idx)",
     "c + a*b",
+    "hc_proj(fn,x,pre)",
 
 };
 
-static_assert(GGML_OP_COUNT == 112, "GGML_OP_COUNT != 112");
+static_assert(GGML_OP_COUNT == 113, "GGML_OP_COUNT != 113");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -11272,6 +11274,41 @@ struct ggml_tensor * ggml_hc_post(
     result->src[2] = res;
     result->src[3] = comb;
     result->op = GGML_OP_HC_POST;
+
+    return result;
+}
+
+int64_t ggml_hc_proj_sum_offset(int64_t M, int64_t T) {
+    return GGML_PAD(M*T, 16); // the sum starts on a cache line of its own
+}
+
+struct ggml_tensor * ggml_hc_proj(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * fn,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * pre,
+            float                 eps) {
+    GGML_ASSERT(fn->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(x) && x->ne[3] == 1);
+    GGML_ASSERT(fn->ne[0] == x->ne[0]*x->ne[1] && fn->ne[2] == 1 && fn->ne[3] == 1);
+    GGML_ASSERT(x->ne[1] <= 8 && fn->ne[1] <= 64);
+
+    const int64_t M = fn->ne[1];
+    const int64_t T = x->ne[2];
+
+    struct ggml_tensor * result;
+    if (pre) {
+        GGML_ASSERT(pre->type == GGML_TYPE_F32 && pre->nb[0] == sizeof(float));
+        GGML_ASSERT(pre->ne[0] == x->ne[1] && pre->ne[1] == T && pre->ne[2] == 1 && pre->ne[3] == 1);
+        result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ggml_hc_proj_sum_offset(M, T) + x->ne[0]*T);
+    } else {
+        result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, M, T);
+    }
+    result->op = GGML_OP_HC_PROJ;
+    result->src[0] = fn;
+    result->src[1] = x;
+    result->src[2] = pre;
+    memcpy(result->op_params, &eps, sizeof(eps));
 
     return result;
 }
@@ -19575,18 +19612,23 @@ static void ggml_compute_forward_mul_mat_id(
         const void * wdata_mm    = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size_mm = ggml_row_size(vec_dot_type, ne10);
 
-        const int chunks_per_expert = MAX(1, MIN(nth, (int)(ne01 / 32)));
+        // Two chunks per thread and expert: a thread that is done with its chunks waits for the others, half a
+        // chunk on average. Smaller chunks make that wait shorter, each one starts a new run of weights though.
+        const int chunks_per_expert = MAX(1, MIN(2*nth, (int)(ne01 / 16)));
 
         int total_chunks = 0;
         for (int a = 0; a < n_as; a++) {
             if (matrix_row_counts[a] > 0) total_chunks += chunks_per_expert;
         }
 
+        int last_a = 0;
+        int last_acc = 0;
         int chunk_id = ith;
         while (chunk_id < total_chunks) {
-            // Map global chunk_id to (expert_index, local_chunk_index)
-            int acc = 0, cur_a = -1, local_chunk = 0;
-            for (int a = 0; a < n_as; a++) {
+            // Map global chunk_id to (expert_index, local_chunk_index). The chunks of a thread come in rising
+            // order: go on from the expert of the last one.
+            int acc = last_acc, cur_a = -1, local_chunk = 0;
+            for (int a = last_a; a < n_as; a++) {
                 if (matrix_row_counts[a] == 0) continue;
                 if (chunk_id < acc + chunks_per_expert) {
                     cur_a = a;
@@ -19595,6 +19637,11 @@ static void ggml_compute_forward_mul_mat_id(
                 }
                 acc += chunks_per_expert;
             }
+            if (cur_a < 0) {
+                return;
+            }
+            last_a = cur_a;
+            last_acc = acc;
 
             const char * src0_cur = (const char *) ggml_numa_local(src0->data, ith) + cur_a*nb02;
 
@@ -19912,7 +19959,8 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
     const size_t row_size_ug = ggml_row_size(vec_dot_type, ne10);
     const int64_t nr0_base = src0_2 ? ne01 : ne01/2;
 
-    const int chunks_per_expert_ug = MAX(1, MIN(nth, (int)(nr0_base / 32)));
+    // two chunks per thread and expert, see ggml_compute_forward_mul_mat_id
+    const int chunks_per_expert_ug = MAX(1, MIN(2*nth, (int)(nr0_base / 16)));
 
     int total_chunks_ug = 0;
     for (int a = 0; a < n_as; a++) {
@@ -26154,6 +26202,25 @@ static void ggml_compute_forward_hc_pre_f32(
 // Elements [first, last) of one token: dst[i] = x*post[i] + sum_j comb[j*S + i]*res[j] for the S streams i.
 // Written so that the compiler vectorizes it: block by block, every output stream is a few multiply-adds over
 // arrays that do not overlap. If the residual is the destination, its block is copied first.
+// GGML_HC_PROJ=0 in the environment: the hyper-connection nodes as they were before hc_proj, to compare.
+// The graph of DeepSeek-V4 reads the same variable and then builds the separate nodes.
+static bool ggml_hc_proj_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_HC_PROJ");
+        enabled = !(env && strcmp(env, "0") == 0);
+    }
+    return enabled;
+}
+
+// The threads share the elements of a token in whole cache lines: [first, last) for thread ith. hc_post and
+// hc_proj split the same way, so a thread finds in its own cache the part of the streams it has just written.
+static inline void ggml_hc_slice(int ne0, int ith, int nth, int * first, int * last) {
+    const int nblock = (ne0 + 15)/16;
+    *first = 16*(int)((int64_t)nblock*ith/nth);
+    *last  = MIN(ne0, 16*(int)((int64_t)nblock*(ith + 1)/nth));
+}
+
 static void ggml_hc_post_token_f32(int S, int first, int last,
         const float * x, const float * post, const float * comb,
         const char * res, size_t res_nb1, char * dst, size_t dst_nb1) {
@@ -26208,14 +26275,17 @@ static void ggml_compute_forward_hc_post_f32(
 
     int T = x->ne[1];
 
-    if (T == 1) {
-        // one token: the threads share its elements, in whole blocks of 64
-        const int nblock = (ne0 + 63)/64;
-        const int first  = 64*(int)((int64_t)nblock*ith/nth);
-        const int last   = MIN(ne0, 64*(int)((int64_t)nblock*(ith + 1)/nth));
-        if (first < last) {
-            ggml_hc_post_token_f32(S, first, last, (const float *)x->data, (const float *)post->data, (const float *)comb->data,
-                    (const char *)res->data, res->nb[1], (char *)dst->data, dst->nb[1]);
+    if (T < nth && (T == 1 || ggml_hc_proj_enabled())) {
+        // fewer tokens than threads: the threads share the elements of every token
+        int first, last;
+        ggml_hc_slice(ne0, ith, nth, &first, &last);
+        for (int64_t t = 0; t < T && first < last; ++t) {
+            ggml_hc_post_token_f32(S, first, last,
+                    (const float *)((const char *)x->data + t*x->nb[1]),
+                    (const float *)((const char *)post->data + t*post->nb[1]),
+                    (const float *)((const char *)comb->data + t*comb->nb[2]),
+                    (const char *)res->data + t*res->nb[2], res->nb[1],
+                    (char *)dst->data + t*dst->nb[2], dst->nb[1]);
         }
         return;
     }
@@ -26254,6 +26324,159 @@ static void ggml_compute_forward_hc_pre(
     switch (dst->src[0]->type) {
         case GGML_TYPE_F32:
             ggml_compute_forward_hc_pre_f32(params, dst);
+            break;
+        default:
+            GGML_ABORT("fatal error");
+    }
+}
+
+// ggml_compute_forward_hc_proj
+
+// What a thread finds for one token: M partial products and the partial sum of squares, as doubles. The
+// values of a thread end a cache line before those of the next one.
+static inline size_t ggml_hc_proj_part_size(int64_t M, int64_t T) {
+    return GGML_PAD((size_t)T*(M + 1), 8) + 8;
+}
+
+// mixes = fn * rms_norm(x) is computed as (fn * x) * scale, so that the normalized streams are never written.
+// A thread takes its elements of every stream (ggml_hc_slice): the columns of fn that go with them, and the part
+// of x it wrote itself if hc_post made x. ggml_compute_forward_hc_proj_tail() adds up what the threads found.
+static void ggml_compute_forward_hc_proj_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * fn  = dst->src[0];
+    const struct ggml_tensor * x   = dst->src[1];
+    const struct ggml_tensor * pre = dst->src[2];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int     ne0 = x->ne[0];
+    const int     S   = x->ne[1];
+    const int64_t T   = x->ne[2];
+    const int     M   = fn->ne[1];
+
+    const size_t part_size = ggml_hc_proj_part_size(M, T);
+    GGML_ASSERT(params->wsize >= nth*part_size*sizeof(double));
+    double * part = (double *)params->wdata + ith*part_size;
+
+    int first, last;
+    ggml_hc_slice(ne0, ith, nth, &first, &last);
+    const int n = last - first;
+    if (n <= 0) {
+        memset(part, 0, T*(M + 1)*sizeof(double));
+        return;
+    }
+
+    const char * w = (const char *)ggml_numa_local(fn->data, ith);
+
+    // The weights of a thread are M*S short runs, which no hardware prefetcher follows: ask for each one some
+    // 4 kB before its turn. Run k is row k % M, stream k / M.
+    const int    n_run     = M*S;
+    const size_t run_bytes = n*sizeof(float);
+    const int    ahead     = MAX(1, (int)(4096/run_bytes));
+#define GGML_HC_PROJ_RUN(k) (w + ((k) % M)*fn->nb[1] + ((size_t)((k) / M)*ne0 + first)*sizeof(float))
+#if defined(__GNUC__)
+#define GGML_HC_PROJ_PREFETCH(k) do { \
+        const char * pf = GGML_HC_PROJ_RUN(k); \
+        for (size_t i = 0; i < run_bytes; i += 64) __builtin_prefetch(pf + i); \
+    } while (0)
+#else
+#define GGML_HC_PROJ_PREFETCH(k) do { } while (0)
+#endif
+    for (int k = 0; k < MIN(ahead, n_run); ++k) {
+        GGML_HC_PROJ_PREFETCH(k);
+    }
+
+    memset(part, 0, T*(M + 1)*sizeof(double));
+
+    for (int s = 0; s < S; ++s) {
+        const float * xs = (const float *)((const char *)x->data + s*x->nb[1]) + first; // of token 0
+        for (int64_t t = 0; t < T; ++t) {
+            part[t*(M + 1) + M] += ggml_vec_sum_sq_f32(n, (const float *)((const char *)xs + t*x->nb[2]));
+        }
+        for (int m = 0; m < M; ++m) {
+            const int k = s*M + m;
+            if (k + ahead < n_run) {
+                GGML_HC_PROJ_PREFETCH(k + ahead);
+            }
+            // a run meets every token while it is in the cache
+            const float * wr = (const float *)GGML_HC_PROJ_RUN(k);
+            for (int64_t t = 0; t < T; ++t) {
+                float d;
+                ggml_vec_dot_f32(n, &d, 0, wr, 0, (const float *)((const char *)xs + t*x->nb[2]), 0, 1);
+                part[t*(M + 1) + m] += d;
+            }
+        }
+    }
+#undef GGML_HC_PROJ_PREFETCH
+#undef GGML_HC_PROJ_RUN
+
+    if (pre) {
+        // the same sums, in the same order, as mul_multi_add
+        float * sum = (float *)dst->data + ggml_hc_proj_sum_offset(M, T);
+        for (int64_t t = 0; t < T; ++t) {
+            const char  * xt = (const char *)x->data + t*x->nb[2];
+            const float * p  = (const float *)((const char *)pre->data + t*pre->nb[1]);
+            float * restrict y = sum + t*ne0 + first;
+            for (int s = 0; s < S; ++s) {
+                const float * restrict xs = (const float *)(xt + s*x->nb[1]) + first;
+                const float ps = p[s];
+                if (s == 0) {
+                    for (int k = 0; k < n; ++k) y[k] = xs[k] * ps;
+                } else {
+                    for (int k = 0; k < n; ++k) y[k] += xs[k] * ps;
+                }
+            }
+        }
+    }
+}
+
+// thread 0 alone, when every thread is done with the node: params->nth is the number of threads that were
+static void ggml_compute_forward_hc_proj_tail(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * fn = dst->src[0];
+    const struct ggml_tensor * x  = dst->src[1];
+
+    const int64_t T    = x->ne[2];
+    const int     M    = fn->ne[1];
+    const int64_t n_in = x->ne[0]*x->ne[1];
+
+    float eps;
+    memcpy(&eps, dst->op_params, sizeof(float));
+    GGML_ASSERT(eps > 0.0f);
+
+    const size_t part_size = ggml_hc_proj_part_size(M, T);
+    const double * part = (const double *)params->wdata;
+
+    for (int64_t t = 0; t < T; ++t) {
+        double acc[65];
+        for (int m = 0; m <= M; ++m) {
+            acc[m] = 0.0;
+        }
+        for (int ith = 0; ith < params->nth; ++ith) {
+            const double * pt = part + ith*part_size + t*(M + 1);
+            for (int m = 0; m <= M; ++m) {
+                acc[m] += pt[m];
+            }
+        }
+        // as rms_norm computes it
+        const float mean  = acc[M]/n_in;
+        const float scale = 1.0f/sqrtf(mean + eps);
+        float * y = (float *)dst->data + t*M;
+        for (int m = 0; m < M; ++m) {
+            y[m] = (float)(acc[m]*scale);
+        }
+    }
+}
+
+static void ggml_compute_forward_hc_proj(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            ggml_compute_forward_hc_proj_f32(params, dst);
             break;
         default:
             GGML_ABORT("fatal error");
@@ -28622,6 +28845,10 @@ static int ggml_compute_forward(struct ggml_compute_params * params, struct ggml
             {
                 ggml_compute_forward_hc_post(params, tensor);
             } break;
+        case GGML_OP_HC_PROJ:
+            {
+                ggml_compute_forward_hc_proj(params, tensor);
+            } break;
         case GGML_OP_MASK_TO_IDX:
             {
                 ggml_compute_forward_mask_to_idx(params, tensor);
@@ -29722,6 +29949,7 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
         case GGML_OP_SINKHORN:
         case GGML_OP_HC_PRE:
         case GGML_OP_HC_POST:
+        case GGML_OP_HC_PROJ:
         case GGML_OP_MASK_TO_IDX:
         case GGML_OP_LATENT_ATTN:
         case GGML_OP_DS4_COMP:
@@ -30505,6 +30733,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_SINKHORN:
         case GGML_OP_HC_PRE:
         case GGML_OP_HC_POST:
+        case GGML_OP_HC_PROJ:
         case GGML_OP_MASK_TO_IDX:
         case GGML_OP_LATENT_ATTN:
         case GGML_OP_DS4_COMP:
@@ -30867,6 +31096,10 @@ struct ggml_cplan ggml_graph_plan(const struct ggml_cgraph * cgraph, int n_threa
                 {
                     cur = ggml_type_size(node->type)*(n_tasks + node->src[0]->ne[0]*n_tasks);
                 } break;
+            case GGML_OP_HC_PROJ:
+                {
+                    cur = n_threads*ggml_hc_proj_part_size(node->src[0]->ne[1], node->src[1]->ne[2])*sizeof(double);
+                } break;
             case GGML_OP_COUNT:
                 {
                     GGML_ABORT("fatal error");
@@ -30955,6 +31188,7 @@ static int64_t ggml_prof_weight_bytes(const struct ggml_tensor * node) {
     }
     switch (node->op) {
         case GGML_OP_MUL_MAT:
+        case GGML_OP_HC_PROJ:
             return ggml_nbytes(node->src[0]);
         case GGML_OP_FUSED_UP_GATE:
             return ggml_nbytes(w) + (node->src[1] ? ggml_nbytes(node->src[1]) : 0);
@@ -31246,7 +31480,9 @@ static inline bool ggml_node_is_serial(const struct ggml_tensor * node) {
         case GGML_OP_FUSED_RMS_NORM:
             return ggml_nelements(node) <= 32768;
         case GGML_OP_HC_POST:
-            return ggml_nelements(node) <= 65536;
+            // Not the 20480 values of the streams of a DeepSeek-V4 token: when their turn comes they are in no
+            // cache any more, and one thread waits for the memory much longer than 32 threads do.
+            return ggml_nelements(node) <= (ggml_hc_proj_enabled() ? 8192 : 65536);
         case GGML_OP_MUL_MULTI_ADD:
         case GGML_OP_REPEAT:
         case GGML_OP_CONCAT:
@@ -31376,6 +31612,26 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             if (state->ith == 0) {
                 prof->n_run[prof_node]++;
                 prof->bytes[prof_node] += ggml_prof_weight_bytes(node);
+            }
+        }
+
+        if (node->op == GGML_OP_HC_PROJ) {
+            // the threads left partial results: thread 0 adds them up, the way it computes a serial node
+            if (state->ith == 0) {
+                ggml_compute_forward_hc_proj_tail(&params, node);
+                if (prof_time) {
+                    const int64_t t = ggml_prof_ns();
+                    prof_time[prof_node].work_ns += t - prof_t;
+                    prof_t = t;
+                }
+            }
+            if (serial_nodes) {
+                serial_pending = true;
+            } else {
+                ggml_barrier(state->shared);
+                if (prof_time) {
+                    prof_t = ggml_prof_ns();
+                }
             }
         }
 

@@ -755,6 +755,7 @@ extern "C" {
         GGML_OP_DS4_COMP,
 
         GGML_OP_FMA,
+        GGML_OP_HC_PROJ,
 
         GGML_OP_COUNT,
     };
@@ -2834,6 +2835,22 @@ extern "C" {
             struct ggml_tensor  * post,
             struct ggml_tensor  * res,
             struct ggml_tensor  * comb);
+
+    // What ggml_hc_pre() takes, without a normalized copy of the streams:
+    //   mixes[:, t] = fn * rms_norm(x[:, :, t] taken as one vector of n_embd*S values, eps)
+    // and, when pre is given, the streams collapsed with it:
+    //   sum[:, t] = sum over s of pre[s, t] * x[:, s, t]
+    // x: [n_embd, S, T], fn: [n_embd*S, M] (F32), pre: [S, T] or NULL.
+    // Without pre the result is mixes, [M, T]. With pre it is 1d and holds mixes and then sum, which starts
+    // ggml_hc_proj_sum_offset(M, T) floats into it: take views of the two.
+    GGML_API struct ggml_tensor * ggml_hc_proj(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * fn,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * pre,
+            float                 eps);
+
+    GGML_API int64_t ggml_hc_proj_sum_offset(int64_t M, int64_t T);
 
     GGML_API struct ggml_tensor * ggml_mask_to_index(
             struct ggml_context * ctx,
