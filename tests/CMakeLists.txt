@@ -134,8 +134,12 @@ llama_test(test-numa-mirror)
 llama_build(test-flash-attn-threads.cpp)
 llama_test(test-flash-attn-threads)
 
-llama_build(test-serial-nodes.cpp)
-llama_test(test-serial-nodes)
+# the profile is printed when the process exits: both matrix multiplications in one row, the add in another
+llama_build(test-profile.cpp)
+llama_test(test-profile)
+set_tests_properties(test-profile PROPERTIES
+    PASS_REGULAR_EXPRESSION "0 run\\(s\\) FAILED.*4 threads[^\n]*: 5 graphs.* 2\\.0 [^\n]*MUL_MAT blk\\.#\\.w\\.weight f32.* 1\\.0 [^\n]*ADD sum-#"
+    FAIL_REGULAR_EXPRESSION "FAILED: ")
 
 # build test-tokenizer-0 target once and add many tests
 add_executable(test-tokenizer-0 test-tokenizer-0.cpp)

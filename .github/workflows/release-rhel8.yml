@@ -264,6 +264,12 @@ jobs:
           \`\`\`
 
           The log tells which node holds each copy. \`--numa-mirror\` needs the weights mapped from the files, so it does not work with \`-rtr\`: repack the files once with \`llama-quantize --repack --keep-split\` instead.
+
+          To see where the time goes, start a tool with \`GGML_PROFILE=1\` in the environment. When it exits, it prints for every kind of node the elapsed time per token, how busy the threads were and how fast the weights were read:
+
+          \`\`\`
+          GGML_PROFILE=1 ./llama-server -m model.gguf ... 2> server.log    # stop it with Ctrl+C, then: grep ggml_profile server.log
+          \`\`\`
           EOF
 
           ARGS=()
