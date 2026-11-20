@@ -2609,6 +2609,15 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.graph_attn_precision = argv[i];
         return true;
     }
+    if (arg == "--numa-mirror") {
+        CHECK_ARG
+        params.numa_mirror = argv[i];
+        // the copies are assigned by thread index, the way distribute pins the threads
+        if (params.numa == GGML_NUMA_STRATEGY_DISABLED) {
+            params.numa = GGML_NUMA_STRATEGY_DISTRIBUTE;
+        }
+        return true;
+    }
     if (arg == "--numa") {
         CHECK_ARG
         std::string value(argv[i]);
@@ -3687,6 +3696,11 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
                                                                         "  - numactl: use the CPU map provided by numactl\n"
                                                                         "if run without this previously, it is recommended to drop the system page cache before using this\n"
                                                                         "see https://github.com/ggerganov/llama.cpp/issues/1437" });
+    options.push_back({ "*",           "       --numa-mirror DIR[,DIR]", "directories with a copy of the model files, one per extra NUMA node\n"
+                                                                        "the model path holds the copy on node 0, the first directory the copy on node 1, ...\n"
+                                                                        "each thread then reads the weights from its own node; implies --numa distribute\n"
+                                                                        "place the copies yourself, e.g. on a tmpfs mounted with mpol=bind:N; files without a copy are shared\n"
+                                                                        "needs the weights mapped from the files: not with -rtr, -thp or --no-mmap" });
 
     if (llama_supports_gpu_offload()) {
         options.push_back({ "*",           "-ngl,  --gpu-layers N",
@@ -4740,6 +4754,7 @@ struct llama_model_params common_model_params_to_llama(const gpt_params & params
     mparams.defer_experts   = params.defer_experts;
     mparams.defer_ple       = params.defer_ple;
     mparams.ngram_file      = params.ngram_file.empty() ? nullptr : params.ngram_file.c_str();
+    mparams.numa_mirror     = params.numa_mirror.empty() ? nullptr : params.numa_mirror.c_str();
     mparams.swa_compress    = params.swa_compress;
     if (params.kv_overrides.empty()) {
         mparams.kv_overrides = NULL;
@@ -5894,6 +5909,7 @@ void yaml_dump_non_result_info(FILE * stream, const gpt_params & params, const l
     fprintf(stream, "defer_experts: %s # default: false\n", params.defer_experts ? "true" : "false");
     fprintf(stream, "defer_ple: %s # default: false\n", params.defer_ple ? "true" : "false");
     fprintf(stream, "ngram_file: %s # default:\n", params.ngram_file.c_str());
+    fprintf(stream, "numa_mirror: %s # default:\n", params.numa_mirror.c_str());
     fprintf(stream, "prefetch_experts: %s # default: false\n", params.prefetch_experts ? "true" : "false");
     fprintf(stream, "prefetch_experts_threads: %d # default: 0 (auto)\n", params.prefetch_experts_threads);
     fprintf(stream, "max_extra_alloc: %d # default: 256\n", params.max_extra_alloc_MiB);

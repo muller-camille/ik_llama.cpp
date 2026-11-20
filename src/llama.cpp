@@ -10,6 +10,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
+#if defined(__linux__)
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#endif
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -426,6 +430,9 @@ static const char * llama_expert_gating_func_name(llm_expert_gating_func_type ty
 }
 
 llama_model::~llama_model() {
+    for (const void * addr : numa_mirror_addrs) {
+        ggml_numa_mirror_remove(addr);
+    }
     for (struct ggml_context * ctx : ctxs) {
         ggml_free(ctx);
     }
@@ -5802,6 +5809,194 @@ static bool llm_load_tensors(
     return true;
 }
 
+#ifdef __linux__
+// same bytes at the start, at the end and every 64 MiB in between
+static bool llm_same_file_samples(int fd_a, int fd_b, size_t size) {
+    const size_t head = std::min(size, (size_t) 1 << 20);
+    const size_t page = 4096;
+    const size_t step = (size_t) 64 << 20;
+    std::vector<char> a(head), b(head);
+    auto same = [&](size_t offs, size_t n) {
+        return pread(fd_a, a.data(), n, offs) == (ssize_t) n &&
+               pread(fd_b, b.data(), n, offs) == (ssize_t) n && memcmp(a.data(), b.data(), n) == 0;
+    };
+    if (!same(0, head)) {
+        return false;
+    }
+    for (size_t offs = step; offs + page <= size; offs += step) {
+        if (!same(offs, page)) {
+            return false;
+        }
+    }
+    return size < page || same(size - page, page);
+}
+#endif
+
+// --numa-mirror: map the copies of the model files found in the given directories, one directory per extra NUMA node.
+// The matrix multiplications then read the copy that belongs to the calling thread (see ggml_numa_mirror_add).
+static void llm_numa_mirror_init(llama_model_loader & ml, llama_model & model, const std::string & dirs) {
+#ifdef __linux__
+    bool mapped = false;
+    for (const auto & mapping : model.mappings) {
+        mapped = mapped || (mapping && !mapping->is_anonymous());
+    }
+    if (!mapped) {
+        LLAMA_LOG_WARN("%s: --numa-mirror ignored: the weights are not used from the mapped model files (-rtr, -thp and --no-mmap copy them)\n", __func__);
+        return;
+    }
+
+    const size_t n_files = std::min(model.mappings.size(), ml.files.size());
+    std::vector<std::string> names = { "model files" };
+    std::vector<std::vector<const char *>> copies(n_files); // per file: the copy in each directory, or nullptr
+
+    for (size_t start = 0; start <= dirs.size(); ) {
+        size_t end = dirs.find(',', start);
+        if (end == std::string::npos) {
+            end = dirs.size();
+        }
+        const std::string dir = dirs.substr(start, end - start);
+        start = end + 1;
+        if (dir.empty()) {
+            continue;
+        }
+
+        size_t n_mirrored = 0, n_bytes = 0;
+        for (size_t fi = 0; fi < n_files; ++fi) {
+            const auto & mapping = model.mappings[fi];
+            const auto & file    = ml.files[fi];
+            copies[fi].push_back(nullptr);
+            if (!mapping || mapping->is_anonymous()) {
+                continue;
+            }
+            const std::string & path = file->get_path();
+            const size_t slash = path.find_last_of('/');
+            const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+            const std::string copy_path = dir + "/" + name;
+            if (access(copy_path.c_str(), R_OK) != 0) {
+                LLAMA_LOG_INFO("%s: no copy of %s in %s\n", __func__, name.c_str(), dir.c_str());
+                continue;
+            }
+            auto copy_file = std::make_unique<llama_file>(copy_path.c_str(), "rb");
+            struct stat st_a, st_b;
+            if (fstat(file->file_id(), &st_a) != 0 || fstat(copy_file->file_id(), &st_b) != 0) {
+                throw std::runtime_error(format("--numa-mirror: cannot stat %s", copy_path.c_str()));
+            }
+            if (st_a.st_dev == st_b.st_dev && st_a.st_ino == st_b.st_ino) {
+                throw std::runtime_error(format("--numa-mirror: %s is the model file itself, not a copy", copy_path.c_str()));
+            }
+            if (copy_file->size() != file->size() || !llm_same_file_samples(file->file_id(), copy_file->file_id(), file->size())) {
+                throw std::runtime_error(format("--numa-mirror: %s is not a copy of %s", copy_path.c_str(), path.c_str()));
+            }
+            auto copy = std::make_unique<llama_mmap>(copy_file.get(), 0, true, false);
+            copies[fi].back() = (const char *) copy->addr();
+            n_bytes += copy->size();
+            ++n_mirrored;
+            model.numa_mirror_files.emplace_back(std::move(copy_file));
+            model.numa_mirror_mappings.emplace_back(std::move(copy));
+        }
+        if (n_mirrored > 0) {
+            LLAMA_LOG_INFO("%s: %zu of %zu model files (%.2f GiB) have a copy in %s\n", __func__,
+                    n_mirrored, n_files, n_bytes / 1024.0 / 1024.0 / 1024.0, dir.c_str());
+        } else {
+            // not an error: a draft model is loaded with the same option
+            LLAMA_LOG_WARN("%s: no copy of the model files in %s\n", __func__, dir.c_str());
+        }
+        names.push_back(dir);
+    }
+
+    // copy k belongs to node k: a file that is missing in a directory keeps its own memory in that place
+    bool mirrored = false;
+    for (size_t fi = 0; fi < n_files; ++fi) {
+        if (std::all_of(copies[fi].begin(), copies[fi].end(), [](const char * c) { return c == nullptr; })) {
+            continue;
+        }
+        const auto & mapping = model.mappings[fi];
+        model.numa_mirror_addrs.push_back(mapping->addr()); // first, so that a failure below is undone with the model
+        for (const char * copy : copies[fi]) {
+            if (!ggml_numa_mirror_add(mapping->addr(), mapping->size(), copy ? copy : mapping->addr())) {
+                throw std::runtime_error(format("--numa-mirror: cannot register the copies of %s", ml.files[fi]->get_path().c_str()));
+            }
+        }
+        mirrored = true;
+    }
+    if (!mirrored) {
+        return;
+    }
+
+    // which node holds each copy: look at one page per weight
+    const size_t page = sysconf(_SC_PAGESIZE);
+    const int n_copies = (int) names.size();
+    std::vector<std::vector<void *>> pages(n_copies);
+    unsigned touched = 0;
+    for (ggml_context * ctx : model.ctxs) {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+            const char * data = (const char *) t->data;
+            for (size_t fi = 0; fi < n_files && data; ++fi) {
+                const auto & mapping = model.mappings[fi];
+                const char * begin = mapping ? (const char *) mapping->addr() : nullptr;
+                if (!begin || data < begin || data >= begin + mapping->size()) {
+                    continue;
+                }
+                const size_t offs = ((size_t) (data - begin) + ggml_nbytes(t)/2) & ~(page - 1);
+                for (int k = 0; k < n_copies; ++k) {
+                    const char * base = k == 0 ? begin : copies[fi][k - 1];
+                    if (base) {
+                        touched += *(const volatile unsigned char *) (base + offs); // the page must be present to be located
+                        pages[k].push_back((void *) (base + offs));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    (void) touched;
+    for (int k = 0; k < n_copies; ++k) {
+        std::vector<int> status(pages[k].size(), -1);
+        std::map<int, size_t> on_node;
+        if (pages[k].empty()) {
+            continue;
+        }
+        if (syscall(SYS_move_pages, 0, (unsigned long) pages[k].size(), pages[k].data(), nullptr, status.data(), 0) != 0) {
+            LLAMA_LOG_INFO("%s: copy %d (%s): cannot tell where it is\n", __func__, k, names[k].c_str());
+            continue;
+        }
+        for (int node : status) {
+            on_node[node < 0 ? -1 : node]++;
+        }
+        std::string where;
+        int    best = -1;
+        size_t best_pages = 0;
+        for (const auto & it : on_node) {
+            where += format("%s%.0f%% %s", where.empty() ? "" : ", ", 100.0 * it.second / status.size(),
+                    it.first < 0 ? "unknown" : format("on node %d", it.first).c_str());
+            if (it.second > best_pages) {
+                best       = it.first;
+                best_pages = it.second;
+            }
+        }
+        LLAMA_LOG_INFO("%s: copy %d (%s): %s\n", __func__, k, names[k].c_str(), where.c_str());
+        if (ggml_is_numa() && (best != k || 10 * best_pages < 9 * status.size())) {
+            LLAMA_LOG_WARN("%s: copy %d is read by the threads of NUMA node %d but is not all on that node\n", __func__, k, k);
+        }
+    }
+    if (!ggml_is_numa()) {
+        LLAMA_LOG_WARN("%s: one NUMA node only or no --numa: the copies are used but bring nothing\n", __func__);
+    } else {
+        int n_nodes = 0;
+        while (access(format("/sys/devices/system/node/node%d", n_nodes).c_str(), F_OK) == 0) {
+            ++n_nodes;
+        }
+        if (n_nodes != n_copies) {
+            LLAMA_LOG_WARN("%s: %d NUMA nodes but %d copies: thread i reads copy i %% %d and runs on node i %% %d\n", __func__,
+                    n_nodes, n_copies, n_copies, n_nodes);
+        }
+    }
+#else
+    (void) ml; (void) model; (void) dirs;
+    LLAMA_LOG_WARN("%s: --numa-mirror is only supported on Linux\n", __func__);
+#endif
+}
+
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static int llama_model_load(const std::string & fname, llama_model & model, llama_model_params & params) {
     try {
@@ -5887,6 +6082,10 @@ static int llama_model_load(const std::string & fname, llama_model & model, llam
             params.progress_callback, params.progress_callback_user_data
         )) {
             return -2;
+        }
+
+        if (params.numa_mirror && params.numa_mirror[0] && !params.dry_run) {
+            llm_numa_mirror_init(ml, model, params.numa_mirror);
         }
 
         const enum llama_mtp_package mtp_package = llama_model_mtp_package(&model);
@@ -9167,6 +9366,7 @@ struct llama_model_params llama_model_default_params() {
         /*.kv_overrides                =*/ nullptr,
         /*.tensor_buft_overrides       =*/ nullptr,
         /*.ngram_file                  =*/ nullptr,
+        /*.numa_mirror                 =*/ nullptr,
         /*.nvfp4_precision             =*/ LLAMA_NVFP4_PRECISION_AUTO,
         /*.fp8_precision               =*/ LLAMA_FP8_PRECISION_AUTO,
         /*.vocab_only                  =*/ false,

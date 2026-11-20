@@ -464,6 +464,9 @@ extern "C" {
 
         // separate GGUF with the n-gram tables (per-layer token embedding, Engram), NULL if none
         const char * ngram_file;
+
+        // directories with byte-identical copies of the model files, comma separated, one per extra NUMA node, NULL if none
+        const char * numa_mirror;
         enum llama_nvfp4_precision nvfp4_precision;
         enum llama_fp8_precision fp8_precision;
 

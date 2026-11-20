@@ -658,6 +658,11 @@ struct llama_model {
     // model memory mapped files
     llama_mmaps mappings;
 
+    // copies of the model files on other NUMA nodes (--numa-mirror)
+    llama_files numa_mirror_files;
+    llama_mmaps numa_mirror_mappings;
+    std::vector<const void *> numa_mirror_addrs; // mappings registered with ggml_numa_mirror_add
+
     // objects representing data potentially being locked in memory
     llama_mlocks mlock_bufs;
     llama_mlocks mlock_mmaps;

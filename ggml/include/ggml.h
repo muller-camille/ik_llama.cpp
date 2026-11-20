@@ -975,6 +975,12 @@ extern "C" {
     GGML_API void    ggml_numa_init(enum ggml_numa_strategy numa); // call once for better performance on NUMA systems
     GGML_API bool    ggml_is_numa(void); // true if init detected that system has >1 NUMA node
 
+    // NUMA mirror: extra read-only copies of weight memory, one per NUMA node. The memory at addr is copy 0.
+    // The matrix multiplications read copy ith % n_copies in thread ith, which is the node that
+    // GGML_NUMA_STRATEGY_DISTRIBUTE pins the thread to. Add the copies before computing with the memory.
+    GGML_API bool    ggml_numa_mirror_add(const void * addr, size_t size, const void * copy);
+    GGML_API void    ggml_numa_mirror_remove(const void * addr);
+
     GGML_API void    ggml_print_object (const struct ggml_object * obj);
     GGML_API void    ggml_print_objects(const struct ggml_context * ctx);
 
