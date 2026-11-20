@@ -15928,6 +15928,24 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                     q += ggml_type_size(type);
                 }
             } break;
+        case GGML_TYPE_MXFP8:
+            {
+                // one E8M0 scale in front of every 32 E4M3 codes
+                const uint8_t * q = (const uint8_t *) data;
+                for (size_t i = 0; i < nb; ++i) {
+                    if (q[0] == 0xff) {
+                        fprintf(stderr, "ggml_validate_row_data: found nan value at block %zu\n", i);
+                        return false;
+                    }
+                    for (int j = 1; j <= 32; ++j) {
+                        if ((q[j] & 0x7f) == 0x7f) {
+                            fprintf(stderr, "ggml_validate_row_data: found nan value at block %zu\n", i);
+                            return false;
+                        }
+                    }
+                    q += 33;
+                }
+            } break;
         case GGML_TYPE_Q2_0: break;
         case GGML_TYPE_Q6_0: break;
         case GGML_TYPE_IQ2_K: break;
