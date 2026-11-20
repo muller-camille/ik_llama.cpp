@@ -1483,6 +1483,8 @@ static void mul_mat_mxfp4_r8_q8_2_avx2(int n, const void * vx, size_t bx, const 
     auto table = MM256_SET1_M128I(table128);
     table = _mm256_add_epi8(table, _mm256_set1_epi8(12));
     __m256i v[8];
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     if constexpr (nrc_y == 1) {
         union { __m256 vec; float val[8]; } helper;
         for (int ix = 0; ix < nrc_x; ix += 8) {
@@ -1490,6 +1492,7 @@ static void mul_mat_mxfp4_r8_q8_2_avx2(int n, const void * vx, size_t bx, const 
             auto acc1 = _mm256_setzero_ps();
             auto acc2 = _mm256_setzero_ps();
             for (int ib4 = 0; ib4 < nb/4; ++ib4) {
+                iqk_prefetch_ahead((const char *)&iq4[4*ib4], 4*sizeof(block_mxfp4_r8), pf_dist, pf_end);
                 helper.vec = convert_scales((const uint16_t *)q8.y[0][ib4].d);
                 for (int k = 0; k < 4; ++k) {
                     auto scales = convert_mxfp4_scales(iq4[4*ib4+k].e);
@@ -1520,6 +1523,7 @@ static void mul_mat_mxfp4_r8_q8_2_avx2(int n, const void * vx, size_t bx, const 
         for (int ix = 0; ix < nrc_x; ix += 8) {
             auto * iq4 = (const block_mxfp4_r8 *)((const char *)vx + ix*bx);
             for (int ib4 = 0; ib4 < nb/4; ++ib4) {
+                iqk_prefetch_ahead((const char *)&iq4[4*ib4], 4*sizeof(block_mxfp4_r8), pf_dist, pf_end);
                 __m256 d4[4];
                 {
                     for (int k = 0; k < 4; ++k) {
@@ -1613,10 +1617,14 @@ static void mul_mat_mxfp4_r8_q8_2(int n, const void * vx, size_t bx, const DataI
         return _mm512_add_epi32(sumi1, sumi2);
     };
     float d8[8*nrc_y];
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     for (int ix = 0; ix < nrc_x; ix += 16) {
         auto iq4l = (const block_mxfp4_r8 *)((const char *)vx + (ix+0)*bx);
         auto iq4h = (const block_mxfp4_r8 *)((const char *)vx + (ix+8)*bx);
         for (int ib4 = 0; ib4 < nb/4; ++ib4) {
+            iqk_prefetch_ahead((const char *)&iq4l[4*ib4], 4*sizeof(block_mxfp4_r8), pf_dist, (const char *)iq4h, 8*bx, pf_end);
+            iqk_prefetch_ahead((const char *)&iq4h[4*ib4], 4*sizeof(block_mxfp4_r8), pf_dist, (const char *)iq4h + 8*bx, 8*bx, pf_end);
             for (int iy = 0; iy < nrc_y; ++iy) {
                 _mm256_storeu_ps(d8+8*iy, convert_scales((const uint16_t *)q8.y[iy][ib4].d));
             }
@@ -2028,9 +2036,12 @@ static inline void mul_mat_q8_0_r8_q8_2_avx2(int n, const void * vx, size_t bx, 
         return _mm256_add_epi32(sumi1, sumi2);
 #endif
     };
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     for (int ix = 0; ix < nrc_x; ix += 8) {
         const block_q8_0_r8 * iq8 = (const block_q8_0_r8 *)((const char *)vx + ix*bx);
         for (int ib4 = 0; ib4 < nb/4; ++ib4) {
+            iqk_prefetch_ahead((const char *)&iq8[4*ib4], 4*sizeof(block_q8_0_r8), pf_dist, pf_end);
             for (int iy = 0; iy < nrc_y; ++iy) {
                 auto scales = _mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(_mm_loadl_epi64((const __m128i *)q8.y[iy][ib4].d)), 16));
                 _mm_storeu_ps(d8 + 4*iy, scales);
@@ -2129,6 +2140,8 @@ static void mul_mat_q8_0_r8_q8_2(int n, const void * vx, size_t bx, const DataIn
     }
     Q8<nrc_y, block_q8_2_x4> q8(info);
     int nb = n / QK8_0;
+    const int pf_dist = iqk_prefetch_distance();
+    const char * pf_end = info.x_end ? info.x_end : (const char *)vx + (size_t)nrc_x*bx;
     if constexpr (nrc_y == 1) {
         __m256 acc[2] = {};
         __m256i qx[8];
@@ -2136,6 +2149,7 @@ static void mul_mat_q8_0_r8_q8_2(int n, const void * vx, size_t bx, const DataIn
         for (int ix = 0; ix < nrc_x; ix += 8) {
             const block_q8_0_r8 * iq8 = (const block_q8_0_r8 *)((const char *)vx + ix*bx);
             for (int ib4 = 0; ib4 < nb/4; ++ib4) {
+                iqk_prefetch_ahead((const char *)&iq8[4*ib4], 4*sizeof(block_q8_0_r8), pf_dist, pf_end);
                 _mm256_storeu_ps(d8, convert_scales((const uint16_t *)q8.y[0][ib4].d));
                 for (int k = 0; k < 4; ++k) {
                     auto scales = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)iq8[4*ib4+k].d));
@@ -2167,6 +2181,8 @@ static void mul_mat_q8_0_r8_q8_2(int n, const void * vx, size_t bx, const DataIn
             const block_q8_0_r8 * q8l = (const block_q8_0_r8 *)((const char *)vx + (ix+0)*bx);
             const block_q8_0_r8 * q8h = (const block_q8_0_r8 *)((const char *)vx + (ix+8)*bx);
             for (int ib4 = 0; ib4 < nb/4; ++ib4) {
+                iqk_prefetch_ahead((const char *)&q8l[4*ib4], 4*sizeof(block_q8_0_r8), pf_dist, (const char *)q8h, 8*bx, pf_end);
+                iqk_prefetch_ahead((const char *)&q8h[4*ib4], 4*sizeof(block_q8_0_r8), pf_dist, (const char *)q8h + 8*bx, 8*bx, pf_end);
                 for (int iy = 0; iy < nrc_y; ++iy) {
                     _mm256_storeu_ps(d8+8*iy, convert_scales((const uint16_t *)q8.y[iy][ib4].d));
                 }

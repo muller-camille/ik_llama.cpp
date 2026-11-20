@@ -61,6 +61,9 @@ struct MulMat {
     std::array<mul_mat_t, IQK_MAX_NY> funcs = {};
     mul_mat_t func16 = nullptr;
     inline void mul_mat_NxM(int n, const void * vx, size_t bx, DataInfo& info, int nrc_x, int nrc_y) {
+        // the rows [vx, x_end) are read in one run, whatever the tiles below
+        info.x_end = (const char *)vx + (size_t)nrc_x*bx;
+        iqk_prefetch_start(vx, (size_t)nrc_x*bx);
 #ifdef __aarch64__
         constexpr int k_x_step = 64; //8192; // Tiling does not seem to help on my M2 Max (but difference to tiling is small)
 #else
@@ -149,7 +152,14 @@ struct MulMat {
 #endif
         auto op = ggml_unary_op(unary_op);
         float tmp[k_x_step*16];
-        auto process = [&tmp, n, op, vx_gate, vx_up, gate_b, up_b, bx, xstep = k_x_step, limit, situ_beta, situ_beta_linear] (mul_mat_t func, const DataInfo& this_info, int ix, int this_nrc_x, int ny) {
+        // two runs of weights, read tile by tile in turn
+        const char * gate_end = (const char *)vx_gate + (size_t)nrc_x*bx;
+        const char * up_end   = (const char *)vx_up   + (size_t)nrc_x*bx;
+        iqk_prefetch_start(vx_gate, (size_t)nrc_x*bx);
+        iqk_prefetch_start(vx_up,   (size_t)nrc_x*bx);
+        auto process = [&tmp, n, op, vx_gate, vx_up, gate_b, up_b, bx, xstep = k_x_step, limit, situ_beta, situ_beta_linear, gate_end, up_end] (mul_mat_t func, const DataInfo& info_in, int ix, int this_nrc_x, int ny) {
+            DataInfo this_info = info_in;
+            this_info.x_end = gate_end;
             func(n, (const void *)((const char *)vx_gate + ix*bx), bx, this_info, this_nrc_x);
             for (int ky = 0; ky < ny; ++ky) {
                 if (gate_b) {
@@ -166,6 +176,7 @@ struct MulMat {
                     for (int j = 0; j < this_nrc_x; ++j) tmp[ky*xstep + j] = std::min(tmp[ky*xstep + j], limit);
                 }
             }
+            this_info.x_end = up_end;
             func(n, (const void *)((const char *)vx_up + ix*bx), bx, this_info, this_nrc_x);
             for (int ky = 0; ky < ny; ++ky) {
                 auto result = this_info.dst_row(ky);
@@ -672,6 +683,14 @@ static void convert_f8_q80(ggml_type type, int typeA, int n, const void * vx, si
     if (!iqk_convert_repack(GGML_TYPE_Q8_0, n, q8.data(), row_size, vy, n, nrc_x)) {
         GGML_ABORT("Fatal error");
     }
+}
+
+int iqk_prefetch_distance() {
+    static const int dist = [] {
+        const char * env = getenv("IQK_PREFETCH");
+        return env ? std::max(0, atoi(env)) : 4096;
+    }();
+    return dist;
 }
 
 extern "C" IQK_API bool iqk_mul_mat(long Nx, long Ny, long ne00,
