@@ -25,6 +25,10 @@ if [ $# -gt 0 ] && [ -d "$1" ]; then
 else
     IK_DIR=${IK_DIR:-$ICI}
 fi
+# un réglage IK_DIR (variable ou ~/.deepseek.conf) fait travailler ce script avec une autre version que la sienne
+if [ "$(cd "$IK_DIR" 2>/dev/null && pwd -P)" != "$(cd "$ICI" && pwd -P)" ]; then
+    echo "== ATTENTION : les outils utilisés sont ceux de $IK_DIR, pas ceux du dossier de ce script ($ICI)"
+fi
 # un thread par cœur physique
 COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 [ "$COEURS" -gt 0 ] 2>/dev/null || COEURS=$(nproc)

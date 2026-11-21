@@ -62,6 +62,9 @@ struct ggml_tensor;
 
 IQK_API size_t iqk_fa_work_buffer_size(const struct ggml_tensor * dst, int nthread);
 
+// adds to the report of GGML_PROFILE how the attention nodes with one K/V head were computed
+IQK_API void iqk_fa_report(void);
+
 typedef void (*barrier_t) (void *);
 
 IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float max_bias,

@@ -3,7 +3,7 @@
 // kernel, GQA and MLA head layouts, and cache lengths that are not a multiple of 32.
 //
 // A second part gives a cache with one K/V head a mask that leaves out most of the rows, in one or several
-// places, as a cache made of parts does, with and without the list of the rows of each query, and compares with a
+// places, as a cache made of parts does, with the list of the rows of each query or that list alone, and compares with a
 // sum written out here in double precision. GGML_FA_SKIP_MASKED=0 in the environment sends these cases the other
 // way through the code, and GGML_FA_ROW_GROUPS=<n> sets how many groups of rows the threads form.
 
@@ -119,17 +119,22 @@ static void test_shape(ggml_type type_kv, int D, int n_head, int n_head_kv, int 
 //   1: a window that moves with the query, in the middle of the cache
 //   2: six separate blocks of rows, more than are taken as separate runs
 //   3: as 0, and the first query sees nothing at all
+//   4: a window that moves with the query, and one row in five of the rest, a little different for every query
 static bool sees(int layout, int iq, int n_q, int ik, int n_kv) {
     const int half = n_kv/2;
     switch (layout) {
         case 0: return ik < half ? ik < 40 - (n_q - 1 - iq) : ik - half < 21;
         case 1: return ik >= half - 50 + iq && ik < half + 9 + iq;
         case 2: return (ik/32) % 3 == 1 && ik/32 < 18 && ik % 32 >= iq && ik % 32 < 20 + iq;
-        default: return iq > 0 && sees(0, iq, n_q, ik, n_kv);
+        case 3: return iq > 0 && sees(0, iq, n_q, ik, n_kv);
+        // 4: a window, and rows picked all over the rest of the cache, not the same for every query
+        default: return (ik >= 100 + iq && ik < 140 + iq) || (ik >= 256 && (ik*7 + iq/2) % 5 == 0);
     }
 }
 
-static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv, int layout, bool with_sinks, bool k_is_v, bool with_index) {
+// index: 0 = the mask alone, 1 = the mask and the list of the rows of each query, 2 = the lists alone
+static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv, int layout, bool with_sinks, bool k_is_v, int index_mode) {
+    const bool with_index = index_mode != 0;
     ggml_init_params ip = { (size_t) 1 << 30, nullptr, false };
     ggml_context * ctx = ggml_init(ip);
 
@@ -158,7 +163,9 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
     // the rows of every query as a list, as ggml_mask_to_index makes it: the rows in view, then -1
     ggml_tensor * index = nullptr;
     if (with_index) {
-        const int n_idx = 256;
+        // long enough for the rows in view, and shorter than the cache: a list as long as the cache is left to
+        // the generic implementation
+        const int n_idx = layout == 4 ? GGML_PAD(48 + (n_kv - 256)/5, 32) : 256;
         index = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_idx, GGML_PAD(n_q, 16));
         for (int iq = 0; iq < (int) index->ne[1]; ++iq) {
             int32_t * id = (int32_t *) index->data + (size_t) iq*n_idx;
@@ -226,7 +233,7 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
             fprintf(stderr, "masked: %s head size %d, %d heads, %d query row(s), cache %d, layout %d, %d threads\n",
                     ggml_type_name(type_kv), D, n_head, n_q, n_kv, layout, n_threads);
         }
-        ggml_tensor * y = ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f);
+        ggml_tensor * y = ggml_flash_attn_ext(ctx, q, k, v, index_mode == 2 ? nullptr : mask, scale, 0.0f, 0.0f);
         if (sinks) {
             ggml_flash_attn_ext_add_sinks(y, sinks);
         }
@@ -254,7 +261,7 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
     if (!bad.empty()) {
         fprintf(stderr, "FAILED: masked %s head size %3d, %2d heads, %d query row(s), cache %4d, layout %d%s%s%s:%s\n",
                 ggml_type_name(type_kv), D, n_head, n_q, n_kv, layout, with_sinks ? ", sinks" : "", k_is_v ? ", K == V" : "",
-                with_index ? ", index list" : "", bad.c_str());
+                index_mode == 1 ? ", index list" : index_mode == 2 ? ", index list alone" : "", bad.c_str());
         n_fail++;
     }
     ggml_free(ctx);
@@ -296,21 +303,28 @@ int main(int argc, char ** argv) {
     for (const auto & s : masked) {
         for (int n_q : { 1, 2, 3, 5, 7, 9 }) {
             for (int n_kv : { 512, 768 }) {
-                for (int layout = 0; layout < 4; ++layout) {
+                for (int layout = 0; layout < 5; ++layout) {
                     if (layout == 3 && n_q == 1) {
                         continue; // a token sees at least itself
                     }
                     const bool variant = (n_q + layout) % 2 == 0;
-                    test_masked(s.type, s.D, s.n_head, n_q, n_kv, layout, variant, !variant, false);
+                    test_masked(s.type, s.D, s.n_head, n_q, n_kv, layout, variant, !variant, 0);
                     ++n_tests;
                     if (layout != 3 && s.D != 48) {
-                        // the same rows as index lists; every query needs one row at least, and a kernel
-                        test_masked(s.type, s.D, s.n_head, n_q, n_kv, layout, !variant, variant, true);
-                        ++n_tests;
+                        // the same rows as index lists, with the mask and without it; every query needs one
+                        // row at least, and a kernel
+                        test_masked(s.type, s.D, s.n_head, n_q, n_kv, layout, !variant, variant, 1);
+                        test_masked(s.type, s.D, s.n_head, n_q, n_kv, layout, variant, variant, 2);
+                        n_tests += 2;
                     }
                 }
             }
         }
+    }
+    // lists alone, over a long cache: more rows than the 8192 whose mask every thread is willing to scan
+    for (int n_q : { 1, 3 }) {
+        test_masked(GGML_TYPE_F16, 512, 64, n_q, 9216, 4, n_q == 1, true, 2);
+        ++n_tests;
     }
     printf("%d of %d cases failed\n", n_fail, n_tests);
     return n_fail ? 1 : 0;
