@@ -2,6 +2,106 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
+## This fork
+
+This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) and adds what it took to run **DeepSeek-V4.1 on CPUs only, on a server with several sockets**, from the GGUF files that upstream llama.cpp produces (for example [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)). Everything after this section is the README of ik_llama.cpp, unchanged.
+
+### What it adds
+
+| Addition | What it does | Switch |
+|---|---|---|
+| Upstream DeepSeek-V4.1 GGUFs | They load as they are, MXFP8 engram table and DSpark draft included. That covers the `UD-Q4_K_XL` files, in spite of the note about `_XL` files below. | |
+| `--numa-mirror DIR[,DIR]` | One copy of the model files per NUMA node: each thread reads the weights from the memory of its own socket. Implies `--numa distribute`. | |
+| Weight prefetch | The kernels of `Q8_0_R8`, `MXFP4_R8`, `Q4_K_R4`, `Q5_K_R4` and `Q6_K_R4` ask for the weights 4 kB ahead. For weights that are not in the cache, one Sapphire Rapids core reads about 12 GB/s instead of 7 to 10. | `IQK_PREFETCH=<bytes>`, `0` = off |
+| Serial small nodes | Thread 0 computes the small nodes of a graph alone; the other threads do not meet at a barrier for them. | `GGML_SERIAL_NODES=0` |
+| `hc_proj` | The norm, the projection and the collapse of the DeepSeek-V4 hyper-connections in one node, each thread on the part of the streams it has just written. | `GGML_HC_PROJ=0` |
+| Even row split | The rows of `Q8_0_R8` matrices go to the threads in groups of 8, no thread more than one group above another; the expert rows are taken in smaller chunks. | |
+| Row sharing | A thread that is done with its rows of a large matrix product computes rows the others have not started on. The values do not depend on who computes them. | `GGML_SHARE_ROWS=0` |
+| Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. | `GGML_PROFILE=1` |
+| `llama-quantize ... COPY` with `--custom-q` | Requantizes only the tensors a rule names and copies the rest. With `--keep-split --partial-requant` only the split files that change are written. | |
+| Release for RHEL 8 | CPU-only binaries for glibc 2.28, see below. | |
+
+The switches are environment variables. The optimizations are on by default, and `=0` turns one off to compare on a given machine. The profile is off unless it is asked for.
+
+### Binaries
+
+The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
+
+```
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5317/ik_llama-rhel8-b5317-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5317-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5317/llama-server --version
+```
+
+### DeepSeek-V4.1 on a 2-socket server
+
+For one token DeepSeek-V4.1-Flash (`UD-Q4_K_XL`) reads 12.9 GB of weights, and they do not stay in any cache. The speed is the speed of the memory, so the set-up is about where the weights are and which thread reads them.
+
+1. Repack the files once. `--numa-mirror` maps the weights from the files, so `-rtr` cannot be used with it:
+
+   ```
+   ./llama-quantize --repack --keep-split DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-00001-of-00009.gguf \
+       /models/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8.gguf COPY
+   ```
+
+2. Keep one copy of the weight files per NUMA node in RAM, each on a tmpfs bound to its node. The engram table (file 8 of 9, 200 GB) is read sparsely and can stay shared: link it into the first directory only.
+
+   ```
+   mount -t tmpfs -o size=300G,huge=always,mpol=bind:0 tmpfs /mnt/ds0
+   mount -t tmpfs -o size=300G,huge=always,mpol=bind:1 tmpfs /mnt/ds1
+   # files 1-7 and 9 in both directories, file 8 linked into /mnt/ds0
+   ```
+
+3. Start with one thread per physical core. On the machine below 32 threads are faster than 64: the weights arrive at the same rate either way.
+
+   ```
+   numactl --interleave=all ./llama-server \
+       -m /mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf --numa-mirror /mnt/ds1 \
+       -t 32 -c 131072 --jinja --swa-compress
+   ```
+
+   The log tells which node holds each copy.
+
+4. Optionally add the DSpark draft of the same repository. It does not change the output; the log prints the acceptance rate:
+
+   ```
+       -md /mnt/ds0/dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf --spec-type dspark:n_max=4
+   ```
+
+Measured on a server with 2 x 16 Sapphire Rapids cores and 8 DDR5 channels per socket, 200 tokens generated after a short prompt:
+
+| Build | Threads | Draft | Tokens/s |
+|---|---|---|---|
+| `rhel8-b5301` | 64 | | 18.4 |
+| `rhel8-b5308` (serial nodes, prefetch) | 64 | | 20.0 |
+| `rhel8-b5308` | 32 | | 21.3 |
+| `rhel8-b5301` | 64 | DSpark, `n_max=4` | 26.0 |
+| `rhel8-b5308` | 64 | DSpark, `n_max=4` | 25.9 |
+
+`hc_proj`, the even row split and the row sharing (`rhel8-b5315` and `rhel8-b5317`) are not measured on that machine yet, and neither is the draft with 32 threads. On the 4-core machine they were developed on, these three are faster or within the noise.
+
+### Where the time goes
+
+```
+GGML_PROFILE=1 ./llama-server -m model.gguf ... 2> server.log    # stop it with Ctrl+C
+grep ggml_profile server.log
+```
+
+A line per kind of node, the layers added up: milliseconds per graph, share, how busy the threads were (all, the even ones, the odd ones, the least and the most busy one) and the GB/s of weights read. A node whose threads are far from 100% busy is waiting for something else than its own work.
+
+### Fewer bytes per token
+
+Once the memory sets the speed, the remaining lever is to read less. The `Q8_0` tensors of `UD-Q4_K_XL` that are not experts (attention, shared expert, output) are 7.9 of the 12.9 GB read per token. This requantizes them to `Q6_K` and writes only the last split file again, 7.3 GB instead of 9.2:
+
+```
+# in the output directory, link the files 1-8 under the new name first: they are not written again
+./llama-quantize --allow-requantize --keep-split --partial-requant \
+    --custom-q '^(blk\.[0-9]+\.(attn_kv|attn_q_[ab]|attn_output_[ab]|ffn_(up|gate|down)_shexp|engram_kv|attn_compressor_(gate|kv)|indexer\.(proj|attn_k|attn_q_b))|output)\.weight$=q6_k_r4' \
+    DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8Q6.gguf COPY
+```
+
+This changes the model. On random weights the error of these tensors goes from 0.5% (`Q8_0`) to 1.8%; **the effect on the quality of the answers is not measured**, and neither is the gain on the 2-socket server (estimated at 8 to 12%).
+
 ## TL;DR
 
 Fork of [llama.cpp](https://github.com/ggerganov/llama.cpp), started in June 2024 and last synced in August 2024. It adds SOTA quantization types and often better performance. Many inference features landed here first: MLA, quant repacking, fused delta-net (GDN in `llama.cpp`), tensor parallel, MTP, DFlash. As of late 2026 it has diverged substantially from upstream. See [Latest News](#latest-news) for recent changes and [Model Support](#model-support) / [Quantization](#quantization) for the full lists.
