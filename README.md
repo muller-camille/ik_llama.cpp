@@ -28,10 +28,21 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5317/ik_llama-rhel8-b5317-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5317-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5317/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5335/ik_llama-rhel8-b5335-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5335-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5335/llama-server --version
 ```
+
+A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
+
+| Script | What it does |
+|---|---|
+| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server |
+| `charger-deepseek.sh` | the loading alone, as root |
+| `mesure.sh` | starts a server of its own and measures the speed, with or without a draft |
+| `profil.sh` | the same with `GGML_PROFILE=1`, in passes that each turn one optimization off |
+| `drafter.sh` | tries several settings of the DSpark draft |
+| `recompresser.sh` | requantizes the non-expert `Q8_0` tensors and installs the result next to the model |
 
 ### DeepSeek-V4.1 on a 2-socket server
 
@@ -75,10 +86,21 @@ Measured on a server with 2 x 16 Sapphire Rapids cores and 8 DDR5 channels per s
 | `rhel8-b5301` | 64 | | 18.4 |
 | `rhel8-b5308` (serial nodes, prefetch) | 64 | | 20.0 |
 | `rhel8-b5308` | 32 | | 21.3 |
+| `rhel8-b5317` (`hc_proj`, even row split, row sharing) | 64 | | 20.8 |
+| `rhel8-b5317` | 32 | | 22.6 |
 | `rhel8-b5301` | 64 | DSpark, `n_max=4` | 26.0 |
 | `rhel8-b5308` | 64 | DSpark, `n_max=4` | 25.9 |
+| `rhel8-b5317` | 32 | DSpark, `n_max=4` | 30.3 |
 
-`hc_proj`, the even row split and the row sharing (`rhel8-b5315` and `rhel8-b5317`) are not measured on that machine yet, and neither is the draft with 32 threads. On the 4-core machine they were developed on, these three are faster or within the noise.
+With `rhel8-b5317` and 32 threads, one optimization turned off at a time:
+
+| Switch | Tokens/s | With the draft |
+|---|---|---|
+| none | 22.6 | 30.3 |
+| `GGML_SHARE_ROWS=0` | 22.2 | 30.1 |
+| `GGML_HC_PROJ=0` | 20.5 | 27.3 |
+
+Each figure is the mean of 5 runs of 200 tokens, and the runs of one build differ by up to 3%, so the 2% of the row sharing is at the limit of what this shows. The draft was accepted at 74% in these runs (68% in the run with `GGML_HC_PROJ=0`, whose text differs), so its gain depends on the text.
 
 ### Where the time goes
 
