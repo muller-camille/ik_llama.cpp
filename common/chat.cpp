@@ -434,6 +434,10 @@ json common_chat_tools_to_json_oaicompat(const std::vector<common_chat_tool> & t
                 { "parameters", json::parse(tool.parameters) },
             }},
         });
+        if (tool.strict) {
+            // only when set: a tool that does not say so reads as before, to the template too
+            result.back()["function"]["strict"] = true;
+        }
     }
     return result;
 }
@@ -463,6 +467,7 @@ std::vector<common_chat_tool> common_chat_tools_parse_oaicompat(const json & too
                     /* .name = */ function.at("name"),
                     /* .description = */ function.value("description", ""),
                     /* .parameters = */ function.value("parameters", json::object()).dump(),
+                    /* .strict = */ function.contains("strict") && function.at("strict").is_boolean() && function.at("strict").get<bool>(),
                 });
             }
         }
@@ -1873,6 +1878,12 @@ static json deepseek_v4_sort_tool_results(const json & messages) {
     return adjusted;
 }
 
+// LLAMA_TOOL_ARGS_STRICT=1 holds the arguments of every tool to its schema, whether the tool says strict or not.
+static bool deepseek_tool_args_strict() {
+    static const bool strict = [] { const char * e = getenv("LLAMA_TOOL_ARGS_STRICT"); return e && e[0] == '1'; }();
+    return strict;
+}
+
 static common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_template &    tmpl,
                                                                  const autoparser::generation_params & inputs) {
     common_chat_params data;
@@ -1953,6 +1964,13 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
                 params.at("required").get_to(required);
             }
 
+            // The schema of a tool that is not strict describes its arguments: the OpenAI API, which the callers
+            // are written for, does not hold the model to it. A caller may leave out of it properties that its
+            // own instructions name, or give them in another order than the model writes them. So inside the
+            // value of a parameter, objects take their properties in any order and others besides.
+            const bool strict = deepseek_tool_args_strict() ||
+                (function.contains("strict") && function.at("strict").is_boolean() && function.at("strict").get<bool>());
+
             auto schema_info = common_schema_info();
             schema_info.resolve_refs(params);
 
@@ -1961,6 +1979,11 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
             for (const auto & [param_name, param_schema] : props.items()) {
                 bool is_required = required.find(param_name) != required.end();
                 bool is_string   = schema_info.resolves_to_string(param_schema);
+
+                json value_schema = param_schema;
+                if (!strict && value_schema.is_object()) {
+                    value_schema[COMMON_SCHEMA_OPEN_OBJECTS] = true;
+                }
 
                 auto arg = p.tool_arg(
                     p.tool_arg_open(
@@ -1971,7 +1994,7 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
                          ? p.tool_arg_string_value(p.until(PARAM_END))
                          : p.tool_arg_json_value(p.schema(p.json(),
                                                           "tool-" + name + "-arg-" + param_name + "-schema",
-                                                          param_schema, false))) +
+                                                          value_schema, false))) +
                     p.tool_arg_close(p.literal(PARAM_END)));
 
                 auto named_arg = p.rule("tool-" + name + "-arg-" + param_name, arg);
