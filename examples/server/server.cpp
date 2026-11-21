@@ -44,7 +44,7 @@ static void llama_log_tee_callback(enum ggml_log_level level, const char * text,
 
 #include <nlohmann/json.hpp>
 #include "index.html.gz.hpp"
-#include "index_llamacpp.html.gz.hpp"
+#include "webui-llamacpp-assets.h"
 #include "loading.html.hpp"
 
 #include <atomic>
@@ -698,6 +698,16 @@ int main(int argc, char ** argv) {
     // Middlewares
     //
 
+    // The llama.cpp web UI is made of many files, and a browser asks for them without the API key. The same
+    // goes for the update check of its service worker, which is answered whichever web UI is served (see below).
+    static std::unordered_set<std::string> webui_paths = { "/index.html", "/sw.js", "/service-worker.js" };
+    const bool webui_llamacpp_embedded = params.webui == COMMON_WEBUI_LLAMACPP && params.public_path.empty();
+    if (webui_llamacpp_embedded) {
+        for (size_t i = 0; i < webui_llamacpp_n_assets; ++i) {
+            webui_paths.insert(std::string("/") + webui_llamacpp_assets[i].name);
+        }
+    }
+
     auto middleware_validate_api_key = [&params](const httplib::Request & req, httplib::Response & res) {
         static const std::unordered_set<std::string> public_endpoints = {
             "/health",
@@ -714,6 +724,9 @@ int main(int argc, char ** argv) {
 
         // If path is public or is static file, skip validation
         if (public_endpoints.find(req.path) != public_endpoints.end() || req.path == "/") {
+            return true;
+        }
+        if (req.method == "GET" && webui_paths.find(req.path) != webui_paths.end()) {
             return true;
         }
 
@@ -2279,6 +2292,47 @@ int main(int argc, char ** argv) {
                     return 1;
                 }
             }
+            else if (params.webui == COMMON_WEBUI_LLAMACPP) {
+                // The llama.cpp web UI: every file of the build at its own path (see webui-llamacpp-assets.h).
+                // The files under _app/immutable carry a hash of their contents in their name and never
+                // change, so a browser may keep them. The others keep their name from one build to the
+                // next and are checked again on every load; an unchanged one costs a 304 without a body.
+                auto serve_asset = [](const webui_asset * a, bool isolation) {
+                    const bool immutable = std::string(a->name).rfind("_app/immutable/", 0) == 0;
+                    return [a, isolation, immutable](const httplib::Request & req, httplib::Response & res) {
+                        if (webui_llamacpp_gzip && req.get_header_value("Accept-Encoding").find("gzip") == std::string::npos) {
+                            res.status = 415;
+                            res.set_content("Error: gzip is not supported by this browser", "text/plain");
+                            return;
+                        }
+                        res.set_header("ETag", a->etag);
+                        res.set_header("Cache-Control", immutable ? "public, max-age=31536000, immutable" : "no-cache");
+                        const std::string if_none_match = req.get_header_value("If-None-Match");
+                        if (!if_none_match.empty() && (if_none_match == a->etag || if_none_match == std::string("W/") + a->etag)) {
+                            res.status = 304;
+                            return;
+                        }
+                        if (webui_llamacpp_gzip) {
+                            res.set_header("Content-Encoding", "gzip");
+                        }
+                        if (isolation) {
+                            // COEP and COOP headers, required by pyodide (python interpreter)
+                            res.set_header("Cross-Origin-Embedder-Policy", "require-corp");
+                            res.set_header("Cross-Origin-Opener-Policy", "same-origin");
+                        }
+                        res.set_content(reinterpret_cast<const char *>(a->data), a->size, a->type);
+                    };
+                };
+                for (size_t i = 0; i < webui_llamacpp_n_assets; ++i) {
+                    const webui_asset * a = &webui_llamacpp_assets[i];
+                    if (std::string(a->name) == "index.html") {
+                        svr->Get("/", serve_asset(a, true));
+                        svr->Get("/index.html", serve_asset(a, true));
+                    } else {
+                        svr->Get(std::string("/") + a->name, serve_asset(a, false));
+                    }
+                }
+            }
             else {
 
                 // using embedded static index.html
@@ -2291,20 +2345,32 @@ int main(int argc, char ** argv) {
                         // COEP and COOP headers, required by pyodide (python interpreter)
                         res.set_header("Cross-Origin-Embedder-Policy", "require-corp");
                         res.set_header("Cross-Origin-Opener-Policy", "same-origin");
-                        if (params.webui == COMMON_WEBUI_AUTO) {
-                            res.set_content(reinterpret_cast<const char*>(index_html_gz), index_html_gz_len, "text/html; charset=utf-8");
-                        }
-                        else if (params.webui == COMMON_WEBUI_LLAMACPP) {
-                            res.set_content(reinterpret_cast<const char*>(index_llamacpp_html_gz), index_llamacpp_html_gz_len, "text/html; charset=utf-8");
-                        }
-                        else {
-                            res.set_content(reinterpret_cast<const char*>(index_html_gz), index_html_gz_len, "text/html; charset=utf-8");
-                        }
+                        res.set_content(reinterpret_cast<const char*>(index_html_gz), index_html_gz_len, "text/html; charset=utf-8");
                     }
                     return false;
                     });
             }
         }
+    }
+    if (!webui_llamacpp_embedded) {
+        // The llama.cpp web UI installs a service worker, and a browser that has used it keeps showing that
+        // UI from the worker's cache after the server is started with another one. The worker checks for
+        // an update of itself: answer with a worker that removes itself and its caches. A file of that
+        // name in --path is served before this. sw.js is the worker of older builds of that UI.
+        const auto serve_sw_remove = [](const httplib::Request &, httplib::Response & res) {
+            static constexpr const char * sw_remove_js = R"(
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil((async () => {
+    await self.registration.unregister();
+    for (const key of await caches.keys()) await caches.delete(key);
+    for (const c of await self.clients.matchAll({ type: 'window' })) c.navigate(c.url);
+})()));
+)";
+            res.set_header("Cache-Control", "no-cache");
+            res.set_content(sw_remove_js, "application/javascript");
+        };
+        svr->Get("/sw.js", serve_sw_remove);
+        svr->Get("/service-worker.js", serve_sw_remove);
     }
     // register API routes
     svr->Get ("/health",              handle_health);
@@ -2374,6 +2440,20 @@ int main(int argc, char ** argv) {
     }
 
     // CORS proxy (EXPERIMENTAL, only used by the Web UI for MCP)
+    // What the llama.cpp web UI asks of every server. This one has no built-in tools and keeps no stream for a
+    // client that comes back; it answers as llama.cpp does without these features, which the UI takes as such.
+    const auto handle_feature_disabled = [](const httplib::Request &, httplib::Response & res) {
+        res.status = 403;
+        res.set_content(
+            (json {{"error", {{"message", "this feature is disabled"}, {"type", "feature_disabled"}}}}).dump(),
+            "application/json; charset=utf-8");
+    };
+    svr->Get ("/tools", handle_feature_disabled);
+    svr->Post("/tools", handle_feature_disabled);
+    svr->Post("/v1/streams/lookup", [](const httplib::Request &, httplib::Response & res) {
+        res.set_content("[]", "application/json; charset=utf-8");
+    });
+
     if (params.webui_mcp_proxy) {
         SRV_WRN("%s", "-----------------\n");
         SRV_WRN("%s", "CORS proxy is enabled, do not expose server to untrusted environments\n");

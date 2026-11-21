@@ -21,6 +21,7 @@ This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik
 | Draft tokens beyond 256 tokens of context | There the attention of DeepSeek-V4 gets the cache rows of each query as a list, and each query went to one thread: with the 2 to 5 tokens of a draft step, the other threads had nothing to do. The threads of a query now share its heads. | |
 | Attention sinks for a token decoded alone | With one query token and one K/V head, two of the three ways the threads share the attention left the sinks out of the softmax: a token decoded alone did not get the result of the same token in a batch. They are applied everywhere now. | |
 | Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. | `GGML_PROFILE=1` |
+| Web UI of llama.cpp | `--webui llamacpp` serves the current web UI of llama.cpp ("Llama Chat"), a build of many files, in place of the older single-page copy. Its files are in `examples/server/public_llamacpp`, with the commit they were built from; `scripts/update-webui-llamacpp.sh` replaces them with a newer build. | `--webui llamacpp` |
 | `llama-quantize ... COPY` with `--custom-q` | Requantizes only the tensors a rule names and copies the rest. With `--keep-split --partial-requant` only the split files that change are written. | |
 | Release for RHEL 8 | CPU-only binaries for glibc 2.28, see below. | |
 
@@ -31,9 +32,9 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5338/ik_llama-rhel8-b5338-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5338-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5338/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5340/ik_llama-rhel8-b5340-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5340-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5340/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
