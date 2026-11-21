@@ -8,11 +8,15 @@
 # choisit une autre : ./profil.sh <dossier ik_llama> [fichier drafter]
 # Autre modèle : MODEL=/mnt/ds0/...-R8Q6-00001-of-00009.gguf ./profil.sh ...
 #
-# Les passes comparent la version telle quelle (un thread par cœur physique), la même sans le partage des
-# lignes entre threads (GGML_SHARE_ROWS=0), la même avec l'ancien calcul des hyper-connexions
-# (GGML_HC_PROJ=0) et la même avec deux fois plus de threads. Chaque passe note aussi le début du texte
-# produit et son empreinte. Le texte peut différer d'une passe à l'autre dès le premier token : il suffit
-# que deux tokens soient presque à égalité et qu'un arrondi change. Il doit rester un texte sensé.
+# Les passes comparent la version telle quelle (un thread par cœur physique) et la même avec une
+# optimisation coupée, d'abord après une question courte, puis après un texte d'environ 4000 tokens :
+# au-delà de 256 tokens de contexte, l'attention ne suit plus le même chemin dans le code.
+#   VARS       les optimisations à couper tour à tour, GGML_FA_SKIP_MASKED=0 par défaut
+#              (exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0 GGML_HC_PROJ=0")
+#   CONTEXTE   taille du texte long en tokens, 4000 par défaut ; CONTEXTE=0 saute ces passes
+# Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe
+# à l'autre dès le premier token : il suffit que deux tokens soient presque à égalité et qu'un arrondi
+# change. Il doit rester un texte sensé.
 #
 # Durée : environ 2 minutes par passe. Le résultat est écrit dans profil-resultat.txt, dans le dossier
 # où vous lancez le script : c'est ce fichier qu'il faut envoyer. Il ne contient ni nom de machine ni nom
@@ -45,7 +49,8 @@ DRAFT=${1:-}
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
 T=${T:-$COEURS}        # threads des passes principales
-T2=${T2:-$((2*T))}     # threads de la passe de comparaison
+VARS=${VARS-GGML_FA_SKIP_MASKED=0}
+CONTEXTE=${CONTEXTE:-4000}
 CTX=${CTX:-131072}
 SPEC=${SPEC:-dspark:n_max=4}
 API_KEY=mesure         # clé du serveur que ce script lance pour lui seul, sur 127.0.0.1
@@ -86,16 +91,30 @@ dire() { echo "$@" | tee -a "$OUT"; }
 } > "$OUT" 2>&1
 echo "== Résultat dans $OUT"
 
-# passe <threads> <drafter ou vide> [VARIABLE=valeur]
+# remplir <tokens> : un texte d'à peu près cette longueur, en paragraphes numérotés (85 tokens environ chacun),
+# déjà échappé pour JSON
+remplir() {
+    local n=$1 i=1
+    while [ $((i*85)) -le "$n" ]; do
+        printf 'Note %d. The archive of the city keeps the registers of the guilds, the maps of the river and the letters of the merchants who crossed the bridge every morning before the market opened. Each volume was copied by hand, checked against the older one and stored on the upper floor, away from the damp of the cellars.\\n\\n' "$i"
+        i=$((i+1))
+    done
+}
+
+# passe <threads> <drafter ou vide> <tokens de texte avant la question, ou 0> [VARIABLE=valeur]
 passe() {
-    local t=$1 draft=$2 var=${3:-} pret=0 v i rep texte
+    local t=$1 draft=$2 contexte=$3 var=${4:-} pret=0 v i rep texte invite
     local args=(-m "$MODEL" -t "$t" -c "$CTX" -cram 100000 --jinja --swa-compress
                 --api-key "$API_KEY" --host 127.0.0.1 --port "$PORT")
     [ -z "$MIRROR" ] || args+=(--numa-mirror "$MIRROR")
     [ -z "$draft" ]  || args+=(-md "$draft" --spec-type "$SPEC")
 
     dire ""
-    dire "=== $t threads, drafter : ${draft:-aucun}${var:+, $var}"
+    if [ "$contexte" -gt 0 ]; then
+        dire "=== $t threads, drafter : ${draft:-aucun}, contexte long${var:+, $var}"
+    else
+        dire "=== $t threads, drafter : ${draft:-aucun}${var:+, $var}"
+    fi
     ( cd "$IK_DIR" && exec env GGML_PROFILE=1 $var numactl --interleave=all ./llama-server "${args[@]}" > "$LOG" 2>&1 ) &
     PID=$!
     echo "   serveur lancé (PID $PID), chargement..."
@@ -114,11 +133,22 @@ passe() {
     done
     [ $pret -eq 1 ] || { dire "Le serveur ne répond pas après 10 minutes."; arreter; return 1; }
 
+    # la requête passe par un fichier : un texte long ne tient pas sur une ligne de commande
+    invite=/tmp/profil-invite-$$.json
+    {
+        printf '{"prompt":"'
+        [ "$contexte" -le 0 ] || remplir "$contexte"
+        printf 'Write a long essay about the history of Paris.\\n\\n","n_predict":%d,"temperature":0,"cache_prompt":true}' "$N_PREDICT"
+    } > "$invite"
     local valeurs=()
     for i in $(seq 1 "$ESSAIS"); do
         rep=$(curl -s "http://127.0.0.1:$PORT/completion" -H "Content-Type: application/json" -H "Authorization: Bearer $API_KEY" \
-                -d '{"prompt":"Write a long essay about the history of Paris.\n\n","n_predict":'"$N_PREDICT"',"temperature":0}' || true)
+                -d @"$invite" || true)
         v=$(echo "$rep" | grep -o '"predicted_per_second":[0-9.]*' | cut -d: -f2 || true)
+        if [ "$i" = 1 ] && [ "$contexte" -gt 0 ]; then
+            # le premier essai lit le texte, les suivants le retrouvent dans le cache du serveur
+            dire "texte lu : $(echo "$rep" | grep -o '"prompt_n":[0-9]*' | head -1 | cut -d: -f2) tokens, $(echo "$rep" | grep -o '"prompt_per_second":[0-9.]*' | head -1 | cut -d: -f2 | xargs printf '%.1f' 2>/dev/null || echo '?') tokens/s"
+        fi
         if [ -z "$v" ]; then
             dire "essai $i : pas de réponse"
         else
@@ -144,17 +174,25 @@ passe() {
     else
         dire "Pas de chronométrage dans le journal : cette version est-elle assez récente ?"
     fi
-    rm -f "$LOG"
+    rm -f "$LOG" "$invite"
 }
 
 # une passe qui échoue n'empêche pas les suivantes
-passe "$T"  ""                         || true
-passe "$T"  "" GGML_SHARE_ROWS=0       || true
-passe "$T"  "" GGML_HC_PROJ=0          || true
-passe "$T2" ""                         || true
+passe "$T" "" 0 || true
+for var in $VARS; do
+    passe "$T" "" 0 "$var" || true
+done
+if [ "$CONTEXTE" -gt 0 ]; then
+    passe "$T" "" "$CONTEXTE" || true
+    for var in $VARS; do
+        passe "$T" "" "$CONTEXTE" "$var" || true
+    done
+fi
 if [ -n "$DRAFT" ]; then
-    passe "$T"  "$DRAFT"                 || true
-    passe "$T"  "$DRAFT" GGML_SHARE_ROWS=0 || true
-    passe "$T"  "$DRAFT" GGML_HC_PROJ=0  || true
+    passe "$T" "$DRAFT" 0 || true
+    for var in $VARS; do
+        passe "$T" "$DRAFT" 0 "$var" || true
+    done
+    [ "$CONTEXTE" -le 0 ] || passe "$T" "$DRAFT" "$CONTEXTE" || true
 fi
 echo "== Terminé. Envoyez le fichier $OUT"

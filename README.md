@@ -17,6 +17,9 @@ This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik
 | `hc_proj` | The norm, the projection and the collapse of the DeepSeek-V4 hyper-connections in one node, each thread on the part of the streams it has just written. | `GGML_HC_PROJ=0` |
 | Even row split | The rows of `Q8_0_R8` matrices go to the threads in groups of 8, no thread more than one group above another; the expert rows are taken in smaller chunks. | |
 | Row sharing | A thread that is done with its rows of a large matrix product computes rows the others have not started on. The values do not depend on who computes them. | `GGML_SHARE_ROWS=0` |
+| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache, and each thread takes some of the heads, so there is nothing to combine between threads. | `GGML_FA_SKIP_MASKED=0` |
+| Draft tokens beyond 256 tokens of context | There the attention of DeepSeek-V4 gets the cache rows of each query as a list, and each query went to one thread: with the 2 to 5 tokens of a draft step, the other threads had nothing to do. The threads of a query now share its heads. | |
+| Attention sinks for a token decoded alone | With one query token and one K/V head, two of the three ways the threads share the attention left the sinks out of the softmax: a token decoded alone did not get the result of the same token in a batch. They are applied everywhere now. | |
 | Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. | `GGML_PROFILE=1` |
 | `llama-quantize ... COPY` with `--custom-q` | Requantizes only the tensors a rule names and copies the rest. With `--keep-split --partial-requant` only the split files that change are written. | |
 | Release for RHEL 8 | CPU-only binaries for glibc 2.28, see below. | |
@@ -28,9 +31,9 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5335/ik_llama-rhel8-b5335-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5335-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5335/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5338/ik_llama-rhel8-b5338-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5338-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5338/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
@@ -40,7 +43,7 @@ A package also holds the shell scripts used on the 2-socket machine below (`scri
 | `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server |
 | `charger-deepseek.sh` | the loading alone, as root |
 | `mesure.sh` | starts a server of its own and measures the speed, with or without a draft |
-| `profil.sh` | the same with `GGML_PROFILE=1`, in passes that each turn one optimization off |
+| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each turn one optimization off |
 | `drafter.sh` | tries several settings of the DSpark draft |
 | `recompresser.sh` | requantizes the non-expert `Q8_0` tensors and installs the result next to the model |
 
