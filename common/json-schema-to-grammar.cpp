@@ -318,6 +318,8 @@ private:
     std::map<std::string, std::string> _rules;
     std::unordered_map<std::string, json> _refs;
     std::unordered_set<std::string> _refs_being_resolved;
+    bool _open_objects = false;   // inside a schema marked COMMON_SCHEMA_OPEN_OBJECTS
+    int  _depth = 0;              // of visit(): 1 for the schema a caller hands in
     std::vector<std::string> _errors;
     std::vector<std::string> _warnings;
 
@@ -663,7 +665,10 @@ private:
             }
             prop_names.push_back(prop_name);
         }
-        if ((additional_properties.is_boolean() && additional_properties.get<bool>()) || additional_properties.is_object()) {
+        // an open object takes other properties unless the schema says no
+        const bool any_additional = (additional_properties.is_boolean() && additional_properties.get<bool>()) ||
+                                    (_open_objects && additional_properties.is_null());
+        if (any_additional || additional_properties.is_object()) {
             std::string sub_name = name + (name.empty() ? "" : "-") + "additional";
             std::string value_rule =
                 additional_properties.is_object() ? visit(additional_properties, sub_name + "-value")
@@ -675,6 +680,22 @@ private:
             std::string kv_rule = _add_rule(sub_name + "-kv", key_rule + " \":\" space " + value_rule);
             prop_kv_rule_names["*"] = kv_rule;
             optional_props.push_back("*");
+        }
+
+        if (_open_objects) {
+            // any of the pairs, any number of times, in any order
+            std::vector<std::string> pairs;
+            for (const auto & prop_name : prop_names) {
+                pairs.push_back(prop_kv_rule_names[prop_name]);
+            }
+            if (prop_kv_rule_names.find("*") != prop_kv_rule_names.end()) {
+                pairs.push_back(prop_kv_rule_names["*"]);
+            }
+            if (pairs.empty()) {
+                return "\"{\" space \"}\" space";
+            }
+            const std::string pair = _add_rule(name + (name.empty() ? "" : "-") + "pair", string_join(pairs, " | "));
+            return "\"{\" space ( " + pair + " ( \",\" space " + pair + " )* )? \"}\" space";
         }
 
         std::string rule = "\"{\" space ";
@@ -837,9 +858,33 @@ public:
     }
 
     std::string visit(const json & schema, const std::string & name) {
+        struct depth_guard {
+            int & depth;
+            depth_guard(int & d) : depth(d) { ++depth; }
+            ~depth_guard() { --depth; }
+        } guard(_depth);
+
+        if (schema.is_object() && schema.contains(COMMON_SCHEMA_OPEN_OBJECTS)) {
+            const json & flag = schema[COMMON_SCHEMA_OPEN_OBJECTS];
+            const bool before = _open_objects;
+            _open_objects = flag.is_boolean() && flag.get<bool>();
+            json inner = schema;
+            inner.erase(COMMON_SCHEMA_OPEN_OBJECTS);
+            --_depth; // the same schema, without the key
+            const std::string rule = visit(inner, name);
+            ++_depth;
+            _open_objects = before;
+            return rule;
+        }
+
         json schema_type = schema.contains("type") ? schema["type"] : json();
         std::string schema_format = schema.contains("format") ? schema["format"].get<std::string>() : "";
         std::string rule_name = is_reserved_name(name) ? name + "-" : name.empty() ? "root" : name;
+
+        if (schema.is_boolean() && schema.get<bool>()) {
+            // the schema `true` accepts any value
+            return _add_rule(rule_name, _add_primitive("value", PRIMITIVE_RULES.at("value")));
+        }
 
         if (schema.contains("$ref")) {
             return _add_rule(rule_name, _resolve_ref(schema["$ref"]));
@@ -993,7 +1038,10 @@ public:
             out << ") space";
             return _add_rule(rule_name, out.str());
         }
-        if (schema.empty() || schema_type == "object") {
+        // The schema {} accepts any value. Handed in by a caller it stands for "some JSON object", as it always
+        // has here (the arguments of a tool without parameters, a JSON answer without a schema); inside another
+        // schema, as the items of an array or the value of a property, it means what it says.
+        if (schema_type == "object" || (schema.empty() && (_depth <= 1 || !schema.is_object()))) {
             return _add_rule(rule_name, _add_primitive("object", PRIMITIVE_RULES.at("object")));
         }
         if (schema_type.is_null() && schema.is_object()) {

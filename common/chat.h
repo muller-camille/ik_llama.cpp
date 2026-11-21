@@ -145,6 +145,7 @@ struct common_chat_tool {
     std::string name;
     std::string description;
     std::string parameters;
+    bool        strict = false; // the caller holds the arguments to the schema ("strict": true)
 };
 
 enum common_chat_tool_choice {

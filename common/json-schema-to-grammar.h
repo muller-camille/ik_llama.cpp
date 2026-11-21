@@ -31,6 +31,13 @@ class common_schema_info {
     bool resolves_to_string(const nlohmann::ordered_json & schema);
 };
 
+// A schema that carries this key set to true is the description of an input, not the form of an output: its
+// objects, and those inside it, are what JSON Schema says they are. Properties come in any order, and any other
+// property may come too unless additionalProperties forbids it; the required ones are not insisted on. Without
+// the key, an object has its required properties first and then the optional ones, in the order of the schema,
+// and nothing else: what suits an output that is asked for in a given form.
+#define COMMON_SCHEMA_OPEN_OBJECTS "x-llama-open-objects"
+
 struct common_grammar_builder {
     std::function<std::string(const std::string&, const std::string&)> add_rule;
     std::function<std::string(const std::string&, const nlohmann::ordered_json&)> add_schema;
