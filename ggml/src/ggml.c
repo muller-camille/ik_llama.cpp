@@ -19658,9 +19658,10 @@ static void ggml_compute_forward_mul_mat_id(
         const void * wdata_mm    = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size_mm = ggml_row_size(vec_dot_type, ne10);
 
-        // Two chunks per thread and expert: a thread that is done with its chunks waits for the others, half a
-        // chunk on average. Smaller chunks make that wait shorter, each one starts a new run of weights though.
-        const int chunks_per_expert = MAX(1, MIN(2*nth, (int)(ne01 / 16)));
+        // One chunk per thread and expert. With two the threads wait less at the end of the node (busy 96%
+        // instead of 93% with 32 threads on two sockets), but every chunk starts a new run of weights and the
+        // node as a whole was 7% slower there.
+        const int chunks_per_expert = MAX(1, MIN(nth, (int)(ne01 / 32)));
 
         int total_chunks = 0;
         for (int a = 0; a < n_as; a++) {
@@ -20005,8 +20006,8 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
     const size_t row_size_ug = ggml_row_size(vec_dot_type, ne10);
     const int64_t nr0_base = src0_2 ? ne01 : ne01/2;
 
-    // two chunks per thread and expert, see ggml_compute_forward_mul_mat_id
-    const int chunks_per_expert_ug = MAX(1, MIN(2*nth, (int)(nr0_base / 16)));
+    // one chunk per thread and expert, see ggml_compute_forward_mul_mat_id
+    const int chunks_per_expert_ug = MAX(1, MIN(nth, (int)(nr0_base / 32)));
 
     int total_chunks_ug = 0;
     for (int a = 0; a < n_as; a++) {
