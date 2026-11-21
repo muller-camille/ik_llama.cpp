@@ -14,6 +14,8 @@
 #   SPEC     réglage du drafter, dspark:n_max=4 par défaut
 #   T        threads, un par cœur physique par défaut
 #   CTX      contexte, 131072 par défaut
+#   WEBUI    page web du serveur : llamacpp (celle de llama.cpp, par défaut), auto (celle d'ik_llama.cpp)
+#            ou none (aucune)
 #
 # Le serveur lancé est celui de la version dans laquelle se trouve ce script ; un dossier ik_llama en
 # premier argument en choisit une autre.
@@ -51,6 +53,7 @@ HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8080}
 T=${T:-$COEURS}
 CTX=${CTX:-131072}
+WEBUI=${WEBUI:-llamacpp}
 
 # --- vérifications ---------------------------------------------------------
 [ "$(id -u)" -ne 0 ] || { echo "Lancez ce script avec votre compte habituel, pas en root."; exit 1; }
@@ -101,7 +104,7 @@ fi
 
 # --- serveur ---------------------------------------------------------------
 ARGS=(-m "/mnt/ds0/$M-00001-of-00009.gguf" --numa-mirror /mnt/ds1
-      -t "$T" -c "$CTX" -cram 100000 --jinja --swa-compress --host "$HOST" --port "$PORT")
+      -t "$T" -c "$CTX" -cram 100000 --jinja --swa-compress --host "$HOST" --port "$PORT" --webui "$WEBUI")
 [ -z "$API_KEY" ] || ARGS+=(--api-key "$API_KEY")
 [ -z "$DRAFT" ]   || ARGS+=(-md "/mnt/ds0/$DRAFT" --spec-type "$SPEC")
 echo "== Démarrage du serveur sur $HOST:$PORT, $T threads, modèle $M (Ctrl+C pour l'arrêter)"

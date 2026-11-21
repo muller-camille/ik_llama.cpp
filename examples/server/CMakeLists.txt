@@ -44,9 +44,8 @@ foreach(asset ${PUBLIC_ASSETS})
 
 endforeach()
 
-# include new llamacpp webui
+# the page shown while the model loads
 set(ALT_PUBLIC_ASSETS
-    index_llamacpp.html.gz
     loading.html
 )
 
@@ -64,6 +63,23 @@ foreach(asset ${ALT_PUBLIC_ASSETS})
 
 endforeach()
 
+
+# The llama.cpp web UI (--webui llamacpp) is a build of many files: they all go into one generated source,
+# gzip-compressed. See public_llamacpp/UPSTREAM for where the build comes from.
+file(GLOB_RECURSE WEBUI_LLAMACPP_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/public_llamacpp/*")
+set(WEBUI_LLAMACPP_SRC "${CMAKE_CURRENT_BINARY_DIR}/webui-llamacpp-assets.cpp")
+add_custom_command(
+    DEPENDS ${WEBUI_LLAMACPP_FILES} "${PROJECT_SOURCE_DIR}/scripts/webui-assets.cmake"
+    OUTPUT "${WEBUI_LLAMACPP_SRC}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DDIST_DIR=${CMAKE_CURRENT_SOURCE_DIR}/public_llamacpp"
+            "-DOUTPUT=${WEBUI_LLAMACPP_SRC}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/webui-llamacpp"
+            -P "${PROJECT_SOURCE_DIR}/scripts/webui-assets.cmake"
+    COMMENT "Embedding the llama.cpp web UI"
+)
+set_source_files_properties(${WEBUI_LLAMACPP_SRC} PROPERTIES GENERATED TRUE)
+list(APPEND TARGET_SRCS ${WEBUI_LLAMACPP_SRC} webui-llamacpp-assets.h)
 
 add_executable(${TARGET} ${TARGET_SRCS})
 install(TARGETS ${TARGET} RUNTIME)

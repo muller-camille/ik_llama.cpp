@@ -97,11 +97,6 @@ lcov-report/
 
 # Server Web UI temporary files
 /examples/server/webui/node_modules
-/examples/server/webui_llamacpp/.svelte-kit
-/examples/server/webui_llamacpp/node_modules
-/examples/server/webui_llamacpp/build
-/examples/server/webui_llamacpp/test-results
-/examples/server/webui_llamacpp/storybook-static
 
 # Python
 

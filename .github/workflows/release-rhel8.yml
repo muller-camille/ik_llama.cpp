@@ -275,6 +275,8 @@ jobs:
           GGML_PROFILE=1 ./llama-server -m model.gguf ... 2> server.log    # stop it with Ctrl+C, then: grep ggml_profile server.log
           \`\`\`
 
+          \`llama-server --webui llamacpp\` serves the current web UI of llama.cpp ("Llama Chat"); without the option it serves the one of ik_llama.cpp.
+
           The package also holds the shell scripts used for DeepSeek-V4.1 on a 2-socket machine; their messages are in French. They use the tools next to them, and read what is specific to the machine (\`NFS\`, \`API_KEY\`, \`HOST\`, ...) from \`~/.deepseek.conf\`, one \`NAME=value\` per line:
 
           - \`deepseek.sh\`: loads the model into RAM, one copy of the weights per socket, and starts the server
