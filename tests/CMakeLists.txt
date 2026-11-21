@@ -141,6 +141,9 @@ llama_test(test-flash-attn-threads NAME test-flash-attn-threads-2-row-groups)
 set_tests_properties(test-flash-attn-threads-2-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=2")
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-4-row-groups)
 set_tests_properties(test-flash-attn-threads-4-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=4")
+# and with a number of groups drawn for every node, as when they are compared in a profile
+llama_test(test-flash-attn-threads NAME test-flash-attn-threads-drawn-row-groups)
+set_tests_properties(test-flash-attn-threads-drawn-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=-1")
 
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)

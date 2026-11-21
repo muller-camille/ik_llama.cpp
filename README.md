@@ -17,10 +17,10 @@ This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik
 | `hc_proj` | The norm, the projection and the collapse of the DeepSeek-V4 hyper-connections in one node, each thread on the part of the streams it has just written. | `GGML_HC_PROJ=0` |
 | Even row split | The rows of `Q8_0_R8` matrices go to the threads in groups of 8, no thread more than one group above another; the expert rows are taken in smaller chunks. | |
 | Row sharing | A thread that is done with its rows of a large matrix product computes rows the others have not started on. The values do not depend on who computes them. | `GGML_SHARE_ROWS=0` |
-| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache. The threads form a grid, groups of rows by groups of heads, sized so that a thread neither fetches all the rows nor combines many partial results; an index list that only repeats the mask is not gathered first. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_ROW_GROUPS=<n>` (1 = no groups of rows) |
-| Draft tokens beyond 256 tokens of context | There the attention of DeepSeek-V4 gets the cache rows of each query as a list, and each query went to one thread: with the 2 to 5 tokens of a draft step, the other threads had nothing to do. The threads of a query now share its heads. | |
+| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache. The threads form a grid, groups of rows by groups of heads, sized so that a thread neither fetches all the rows nor combines many partial results; an index list that only repeats the mask is not gathered first. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_ROW_GROUPS=<n>` (1 = no groups of rows, -1 = drawn for every node: the profile then compares them) |
+| Draft tokens after a long context | Once the context has more compressed rows than the indexer picks, the attention of DeepSeek-V4 gets the cache rows of each token of a draft as a list, not the same rows for every token. The same grid of threads takes them: a thread copies, for one token after the other, the rows of its list that fall to its group of rows, asks for the next ones in advance, and computes that token on them. Before, every thread copied all the rows of a token. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_PREFETCH=<rows>` (0 = none in advance) |
 | Attention sinks for a token decoded alone | With one query token and one K/V head, two of the three ways the threads share the attention left the sinks out of the softmax: a token decoded alone did not get the result of the same token in a batch. They are applied everywhere now. | |
-| Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. | `GGML_PROFILE=1` |
+| Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. For the attention above: how many nodes went which way, with how many groups of rows, and how long they took. | `GGML_PROFILE=1` |
 | Web UI of llama.cpp | `--webui llamacpp` serves the current web UI of llama.cpp ("Llama Chat"), a build of many files, in place of the older single-page copy. Its files are in `examples/server/public_llamacpp`, with the commit they were built from; `scripts/update-webui-llamacpp.sh` replaces them with a newer build. | `--webui llamacpp` |
 | `llama-quantize ... COPY` with `--custom-q` | Requantizes only the tensors a rule names and copies the rest. With `--keep-split --partial-requant` only the split files that change are written. | |
 | Release for RHEL 8 | CPU-only binaries for glibc 2.28, see below. | |
@@ -44,7 +44,7 @@ A package also holds the shell scripts used on the 2-socket machine below (`scri
 | `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server |
 | `charger-deepseek.sh` | the loading alone, as root |
 | `mesure.sh` | starts a server of its own and measures the speed, with or without a draft |
-| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each turn one optimization off |
+| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting |
 | `drafter.sh` | tries several settings of the DSpark draft |
 | `recompresser.sh` | requantizes the non-expert `Q8_0` tensors and installs the result next to the model |
 
@@ -105,6 +105,17 @@ Measured on a server with 2 x 16 Sapphire Rapids cores and 8 DDR5 channels per s
 | 3159 tokens | | 21.4 | 2.7 or 5.6 ms |
 
 With a context of a few thousand tokens the attention is the largest cost that is not reading weights. The text differs from `rhel8-b5317` because of the sinks, and with it the share of accepted draft tokens (63% here, 74% there): a draft step takes 74.4 ms instead of 78.3 ms, for about the same tokens/s on these texts.
+
+`rhel8-b5342` (the threads of the attention in a grid, groups of rows by groups of heads), 32 threads, and the same without groups of rows:
+
+| Prompt | Draft | Tokens/s | Attention per graph | `GGML_FA_ROW_GROUPS=1` |
+|---|---|---|---|---|
+| short | | 23.1 | 1.5 ms | 22.6, 1.9 ms |
+| 3165 tokens | | 21.7 | 2.9 ms | 20.6, 5.1 ms |
+| short | DSpark, `n_max=4` | 30.9 | 3.0 ms for 3.4 tokens | 30.9, 3.1 ms |
+| 3165 tokens | DSpark, `n_max=4` | 24.5 | 8.9 ms for 3.0 tokens | |
+
+In the last line a draft step takes 67.2 ms, and 58% of the draft tokens were accepted on this text.
 
 With `rhel8-b5317` and 32 threads, one optimization turned off at a time:
 

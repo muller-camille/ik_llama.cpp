@@ -31504,6 +31504,9 @@ static void ggml_prof_report(void) {
 
         free(row_of); free(rows); free(work); free(thread_work);
     }
+#if GGML_USE_IQK_MULMAT
+    iqk_fa_report();
+#endif
 }
 
 static bool ggml_serial_nodes_enabled(void) {
