@@ -100,7 +100,10 @@ INVITE=/tmp/mesure-invite-$$.json
         printf 'Note %d. The archive of the city keeps the registers of the guilds, the maps of the river and the letters of the merchants who crossed the bridge every morning before the market opened. Each volume was copied by hand, checked against the older one and stored on the upper floor, away from the damp of the cellars.\\n\\n' "$i"
         i=$((i+1))
     done
-    printf 'Write a long essay about the history of Paris.\\n\\n","n_predict":%d,"temperature":0,"cache_prompt":true}' "$N_PREDICT"
+    printf 'Write a long essay about the history of Paris.\\n\\n'
+    # after a long text, the title of the essay: without it the model goes on with the text
+    [ "$CONTEXTE" -le 0 ] || printf '# The History of Paris\\n\\n'
+    printf '","n_predict":%d,"temperature":0,"cache_prompt":true}' "$N_PREDICT"
 } > "$INVITE"
 
 valeurs=()

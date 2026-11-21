@@ -136,6 +136,11 @@ llama_test(test-flash-attn-threads)
 # the same cases with every cache row given to the kernels
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-all-rows)
 set_tests_properties(test-flash-attn-threads-all-rows PROPERTIES ENVIRONMENT "GGML_FA_SKIP_MASKED=0")
+# and with the rows in view in 2 and in 4 groups, whatever the estimate of the time says
+llama_test(test-flash-attn-threads NAME test-flash-attn-threads-2-row-groups)
+set_tests_properties(test-flash-attn-threads-2-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=2")
+llama_test(test-flash-attn-threads NAME test-flash-attn-threads-4-row-groups)
+set_tests_properties(test-flash-attn-threads-4-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=4")
 
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)

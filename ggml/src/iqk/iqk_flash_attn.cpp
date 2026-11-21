@@ -73,28 +73,47 @@ inline void finish_qkv(int Dv, float M, float S, const float * sink, float * Rac
 // The mask leaves out the rows that are not filled yet, and with a cache made of parts (DeepSeek-V4: the last raw
 // rows, then the compressed ones) the padding of each part. The kernels compute every row they are given, the masked
 // ones come out as zeros. Here the blocks of 32 rows in which no query sees anything are left out: the kernel is
-// called on the runs of the other blocks, and what it returns for each run is combined in the thread. A thread takes
-// some of the heads and goes through all the runs for them, so no thread waits for another one, and none reads what
-// another one has just written.
-constexpr int    k_fa_seen_max_runs  = 4;
-constexpr int    k_fa_seen_max_q     = 8;         // query rows: with 8 and more, K is repacked for all the threads
-constexpr int    k_fa_seen_max_rows  = 8192;      // of the cache: the mask is scanned by every thread
-// One query row: the other way gives every thread a slice of the rows for all the heads, and the threads combine
-// their results. That is the better way once a thread would read much more of K here than it computes with, so K
-// in the runs is limited to this much per head of a thread. (With several query rows, the other way also has
-// every thread read all the rows.)
-constexpr size_t k_fa_seen_bytes_per_head = 256u << 10;
+// called on the runs of the other blocks.
+//
+// The threads form a grid: R groups of rows by G groups of heads. A thread computes the heads of its head group
+// on the rows of its row group; with R > 1 the R threads of a head group then combine what they found, after a
+// barrier. R = 1 needs neither, but every thread then reads all the rows.
+constexpr int    k_fa_seen_max_runs   = 4;
+constexpr int    k_fa_seen_max_q      = 8;     // query rows: with 8 and more, K is repacked for all the threads
+constexpr int    k_fa_seen_max_rows   = 8192;  // of the cache: the mask is scanned by every thread
+constexpr int    k_fa_seen_max_groups = 8;     // of rows
+
+// What the choice of R goes by, in microseconds. Measured on 2 x 16 cores with 32 threads, DeepSeek-V4.1 (64 heads
+// of 512, 1 kB per row of K): the rows of K are in no cache when a node starts, and a thread gets them at about
+// 5.5 GB/s while all the threads of its row group ask for the same ones. What another thread has just written
+// comes over more slowly still. The kernel itself does about 60 products per nanosecond, while it waits for rows.
+constexpr double k_fa_us_per_kb_rows  = 0.18;
+constexpr double k_fa_us_per_kb_parts = 0.44;
+constexpr double k_fa_us_barrier      = 5;
+constexpr double k_fa_products_per_us = 60000;
 
 inline bool fa_skip_masked_enabled() {
     static const bool on = [] { const char * e = getenv("GGML_FA_SKIP_MASKED"); return !(e && e[0] == '0'); }();
     return on;
 }
+// GGML_FA_ROW_GROUPS=<n> sets R where n can be used; 1 is the split without groups of rows
+inline int fa_env_row_groups() {
+    static const int n = [] { const char * e = getenv("GGML_FA_ROW_GROUPS"); return e ? atoi(e) : 0; }();
+    return n;
+}
 
+// The heads a thread can have (R at its largest), and from that the queries of one kernel call and the
+// (head, query row) pairs whose result a thread leaves for its head group.
+inline int fa_seen_heads_cap(int neq2, int nth) {
+    const int R = std::min(k_fa_seen_max_groups, nth);
+    return std::min(neq2, (neq2*R + nth - 1)/nth);
+}
 inline size_t fa_seen_part_size(int Dv, int nq) { return size_t(Dv + 16)*nq*sizeof(float); }
-// what a thread needs: the result of every run for the queries of one kernel call
+inline size_t fa_seen_pieces_size(int Dv, int neq1, int neq2, int nth) {
+    return k_fa_seen_max_runs*fa_seen_part_size(Dv, std::max(fa_seen_heads_cap(neq2, nth), neq1));
+}
 inline size_t fa_seen_thread_size(int Dv, int neq1, int neq2, int nth) {
-    const int nq = std::max((neq2 + nth - 1)/nth, neq1);
-    return k_fa_seen_max_runs*fa_seen_part_size(Dv, nq) + 64;
+    return fa_seen_pieces_size(Dv, neq1, neq2, nth) + fa_seen_part_size(Dv, fa_seen_heads_cap(neq2, nth)*neq1) + 64;
 }
 
 // The runs of 32-row blocks in which at least one of the n_rows mask rows lets a cache row through (anything but
@@ -134,21 +153,86 @@ int fa_seen_runs(const char * mask, int n_rows, size_t stride_m, int nek1, int *
     return n;
 }
 
+// Whether the index list of every query row names exactly the rows that its mask lets through, in rising order:
+// the list then says nothing that the mask does not. n_seen gets the largest number of rows a query sees.
+bool fa_index_is_mask(const ggml_tensor * indexer, const char * mask, int n_rows, size_t stride_m, int nek1, int & n_seen) {
+    constexpr uint16_t h_inf = 0xfc00;
+    n_seen = 0;
+    if (indexer->type != GGML_TYPE_I32 || indexer->ne[1] < n_rows || indexer->ne[2] != 1) return false;
+    const int n_idx = int(indexer->ne[0]);
+    for (int t = 0; t < n_rows; ++t) {
+        auto m  = (const uint16_t *)(mask + t*stride_m);
+        auto id = (const int32_t *)((const char *)indexer->data + t*indexer->nb[1]);
+        int n_mask = 0;
+        for (int j = 0; j < nek1; ++j) n_mask += m[j] != h_inf;
+        int n_list = 0, prev = -1;
+        for (int j = 0; j < n_idx; ++j) {
+            if (id[j] < 0) continue;
+            if (id[j] <= prev || id[j] >= nek1 || m[id[j]] == h_inf) return false;
+            prev = id[j];
+            ++n_list;
+        }
+        if (n_list != n_mask) return false;
+        n_seen = std::max(n_seen, n_mask);
+    }
+    return true;
+}
+
+// The number of row groups for n_blocks blocks in view: the one with the least estimated time. Returns 0 when
+// the threads cannot be arranged in a grid with at least one head per thread.
+int fa_seen_row_groups(int n_blocks, size_t row_bytes, int Dk, int Dv, int neq1, int neq2, int nth) {
+    auto usable = [n_blocks, neq2, nth] (int R) {
+        return R >= 1 && R <= k_fa_seen_max_groups && R <= n_blocks && nth%R == 0 && nth/R <= neq2;
+    };
+    if (usable(fa_env_row_groups())) return fa_env_row_groups();
+    const double rows    = 32.0*n_blocks;
+    const double pairs   = double(neq1)*neq2/nth;   // (head, query row) pairs per thread, whatever R is
+    const double compute = rows*pairs*(Dk + Dv)/k_fa_products_per_us;
+    int best = 0;
+    double best_us = 0;
+    for (int R = 1; R <= k_fa_seen_max_groups; R *= 2) {
+        if (!usable(R)) continue;
+        // the kernel computes while the rows arrive
+        double us = std::max(k_fa_us_per_kb_rows*rows*row_bytes/1024/R, compute);
+        if (R > 1) us += k_fa_us_per_kb_parts*pairs*(R - 1)*Dv*sizeof(float)/1024 + k_fa_us_barrier;
+        if (best == 0 || us < best_us) { best = R; best_us = us; }
+    }
+    return best;
+}
+
 bool iqk_fa_seen_rows(int int_type_k, int int_type_v, int Dk, int Dv, int neq1, int neq2,
-        int n_runs, const int * first, const int * last,
+        int n_runs, const int * first, const int * last, int R,
         long nbq2, int stride_q, int stride_k, int stride_v, int stride_m, int ne1, long nb1,
         const char * q, const char * k, const char * v, const char * mask, const float * sinks,
-        float scale, float softcap, float * qkv, char * work, int ith, int nth) {
-    const int h_first = int(int64_t(neq2)*ith/nth);
-    const int nh      = int(int64_t(neq2)*(ith + 1)/nth) - h_first;
-    if (nh <= 0) return true;
+        float scale, float softcap, float * qkv, char * work,
+        barrier_t barrier, void * barrier_data, int ith, int nth) {
+    const int G = nth/R, g = ith/R, r = ith%R;   // the head group and the row group of this thread
+    const int h_first = int(int64_t(neq2)*g/G);
+    const int nh      = int(int64_t(neq2)*(g + 1)/G) - h_first;
+
+    // the blocks of row group r, as pieces of the runs
+    int pf[k_fa_seen_max_runs], pl[k_fa_seen_max_runs], n_pieces = 0;
+    {
+        int n_blocks = 0;
+        for (int i = 0; i < n_runs; ++i) n_blocks += last[i] - first[i];
+        const int b0 = int(int64_t(n_blocks)*r/R), b1 = int(int64_t(n_blocks)*(r + 1)/R);
+        for (int i = 0, pos = 0; i < n_runs; pos += last[i] - first[i], ++i) {
+            const int lo = std::max(b0, pos), hi = std::min(b1, pos + last[i] - first[i]);
+            if (lo < hi) { pf[n_pieces] = first[i] + lo - pos; pl[n_pieces] = first[i] + hi - pos; ++n_pieces; }
+        }
+    }
+
     // The queries of one kernel call share the conversion of K: the heads of this thread for one token, or the
     // tokens of one head, whichever are more.
     const bool by_token = nh >= neq1;
     const int  n_call   = by_token ? neq1 : nh;
     const int  nq       = by_token ? nh : neq1;
-    const size_t size_part = fa_seen_part_size(Dv, nq);
-    auto part = work + size_t(ith)*fa_seen_thread_size(Dv, neq1, neq2, nth);
+    const size_t size_part   = fa_seen_part_size(Dv, nq);
+    const size_t size_thread = fa_seen_thread_size(Dv, neq1, neq2, nth);
+    const size_t offset_left = fa_seen_pieces_size(Dv, neq1, neq2, nth);
+    const int    left_stride = Dv + 16;                       // what a thread leaves per pair: the sum, then M and S
+    auto pieces = work + size_t(ith)*size_thread;
+    auto left   = (float *)(pieces + offset_left);
     for (int c = 0; c < n_call; ++c) {
         const int h = by_token ? h_first : h_first + c;
         const int t = by_token ? c : 0;
@@ -160,29 +244,50 @@ bool iqk_fa_seen_rows(int int_type_k, int int_type_v, int Dk, int Dv, int neq1, 
         const int sm = by_token ? 0 : stride_m;
         const int ss = by_token ? 1 : 0;
         const int so = by_token ? Dv : int(ne1*nb1/sizeof(float));
-        if (n_runs == 1) {
-            const size_t row = size_t(first[0])*32;
-            if (!iqk_flash_attn_impl(int_type_k, int_type_v, Dk, Dv, nq, 32*(last[0] - first[0]), sq, stride_k, stride_v, sm, so,
+        if (R == 1 && n_pieces == 1) {
+            const size_t row = size_t(pf[0])*32;
+            if (!iqk_flash_attn_impl(int_type_k, int_type_v, Dk, Dv, nq, 32*(pl[0] - pf[0]), sq, stride_k, stride_v, sm, so,
                         qc, k + row*stride_k, v + row*stride_v, mc + row*sizeof(uint16_t), sc, ss, scale, softcap,
                         out, nullptr, nullptr)) return false;
             continue;
         }
-        for (int r = 0; r < n_runs; ++r) {
-            const size_t row = size_t(first[r])*32;
-            auto P = (float *)(part + r*size_part);
-            if (!iqk_flash_attn_impl(int_type_k, int_type_v, Dk, Dv, nq, 32*(last[r] - first[r]), sq, stride_k, stride_v, sm, Dv,
+        for (int p = 0; p < n_pieces; ++p) {
+            const size_t row = size_t(pf[p])*32;
+            auto P = (float *)(pieces + p*size_part);
+            if (!iqk_flash_attn_impl(int_type_k, int_type_v, Dk, Dv, nq, 32*(pl[p] - pf[p]), sq, stride_k, stride_v, sm, Dv,
                         qc, k + row*stride_k, v + row*stride_v, mc + row*sizeof(uint16_t), nullptr, 0, scale, softcap,
                         P, P + size_t(Dv)*nq, P + size_t(Dv + 1)*nq)) return false;
         }
         for (int j = 0; j < nq; ++j) {
-            auto R = out + size_t(j)*so;
+            // the pair: head h_first + jh of the group, query row jt
+            const int jh = by_token ? j : c, jt = by_token ? c : j;
+            auto acc = R == 1 ? out + size_t(j)*so : left + (size_t(jt)*nh + jh)*left_stride;
             float M = -INFINITY, S = 0;
-            for (int r = 0; r < n_runs; ++r) {
-                auto P = (const float *)(part + r*size_part);
-                accumulate_qkv(Dv, M, S, P[size_t(Dv)*nq + j], P[size_t(Dv + 1)*nq + j], R, P + size_t(j)*Dv);
+            for (int p = 0; p < n_pieces; ++p) {
+                auto P = (const float *)(pieces + p*size_part);
+                accumulate_qkv(Dv, M, S, P[size_t(Dv)*nq + j], P[size_t(Dv + 1)*nq + j], acc, P + size_t(j)*Dv);
             }
-            finish_qkv(Dv, M, S, sc ? sc + j*ss : nullptr, R);
+            if (R == 1) {
+                finish_qkv(Dv, M, S, sc ? sc + j*ss : nullptr, acc);
+            } else {
+                acc[Dv] = M; acc[Dv + 1] = S;
+            }
         }
+    }
+    if (R == 1) return true;
+
+    barrier(barrier_data);
+
+    // The pairs of the head group go to its R threads in turn; each combines what the R threads left for a pair.
+    for (int u = r; u < nh*neq1; u += R) {
+        const int jt = u/nh, jh = u - jt*nh;
+        auto acc = qkv + (size_t(jt)*ne1 + h_first + jh)*nb1/sizeof(float);
+        float M = -INFINITY, S = 0;
+        for (int rr = 0; rr < R; ++rr) {
+            auto P = (const float *)(work + size_t(g*R + rr)*size_thread + offset_left) + size_t(u)*left_stride;
+            accumulate_qkv(Dv, M, S, P[Dv], P[Dv + 1], acc, P);
+        }
+        finish_qkv(Dv, M, S, sinks ? sinks + h_first + jh : nullptr, acc);
     }
     return true;
 }
@@ -297,7 +402,7 @@ size_t iqk_fa_work_buffer_size(const struct ggml_tensor * dst, int nth) {
     auto V = dst->src[2];
     // must cover the entry of iqk_fa_seen_rows in iqk_flash_attn_noalibi
     if (dst->src[3] && Q->ne[3] == 1 && K->ne[3] == 1 && V->ne[3] == 1 && K->ne[2] == 1 && V->ne[2] == 1 &&
-        Q->ne[1] < k_fa_seen_max_q && nth <= Q->ne[2]) {
+        Q->ne[1] < k_fa_seen_max_q) {
         size = std::max(size, nth*fa_seen_thread_size(int(V->ne[0]), int(Q->ne[1]), int(Q->ne[2]), nth));
     }
     return size;
@@ -455,6 +560,30 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
     // cannot do before the work is split. An unsupported K/V type combination is reported further down.
     if (are_kv_types_supported(ggml_type(int_type_k_in), ggml_type(int_type_v)) &&
         !fa_kernel_available(int_type_k_in, int_type_v, Dk, Dv)) return false;
+
+    // One K/V head, few query rows, a mask: the rows in view, on a grid of threads (see iqk_fa_seen_rows). An index
+    // list that only repeats the mask is left aside: the rows are read where they are, not gathered first. When
+    // the rows in view are scattered, so that their blocks hold more than twice as many rows, the list is kept.
+    if (mask && neq3 == 1 && nek3 == 1 && nev3 == 1 && nek2 == 1 && nev2 == 1 && neq1 < k_fa_seen_max_q &&
+        nek1%32 == 0 && nek1 <= k_fa_seen_max_rows && fa_skip_masked_enabled() &&
+        are_kv_types_supported(ggml_type(int_type_k_in), ggml_type(int_type_v))) {
+        // every thread finds the same runs and the same grid, so they all take this way or none does
+        int n_seen = 0;
+        if (!indexer || fa_index_is_mask(indexer, (const char *)mask, neq1, stride_m, nek1, n_seen)) {
+            int first[k_fa_seen_max_runs], last[k_fa_seen_max_runs];
+            const int n_runs = fa_seen_runs((const char *)mask, neq1, stride_m, nek1, first, last);
+            int n_blocks = 0;
+            for (int r = 0; r < n_runs; ++r) n_blocks += last[r] - first[r];
+            const bool scattered = indexer && 32*n_blocks > 2*n_seen;
+            const int R = n_runs > 0 && !scattered ? fa_seen_row_groups(n_blocks, stride_k, Dk, Dv, neq1, neq2, nth) : 0;
+            if (R > 0) {
+                return iqk_fa_seen_rows(int_type_k_in, int_type_v, Dk, Dv, neq1, neq2, n_runs, first, last, R,
+                        nbq2, stride_q, stride_k, stride_v, stride_m, ne1, nb1,
+                        (const char *)q, (const char *)k, (const char *)v, (const char *)mask, (const float *)sinks,
+                        scale, softcap, qkv, (char *)work_buffer_in, barrier, barrier_data, ith, nth);
+            }
+        }
+    }
 
     if (indexer && indexer->type == GGML_TYPE_I32) {
         // an unsupported K/V type must reach the abort below, as without the indexer, not the generic indexer path
@@ -630,21 +759,6 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
         }
         barrier(barrier_data);
         GGML_ABORT("Fatal error");
-    }
-
-    if (mask && neq3 == 1 && nek3 == 1 && nev3 == 1 && nek2 == 1 && nev2 == 1 && neq1 < k_fa_seen_max_q && nth <= neq2 &&
-        nek1%32 == 0 && nek1 <= k_fa_seen_max_rows && fa_skip_masked_enabled()) {
-        // every thread finds the same runs, so they all take this way or none does
-        int first[k_fa_seen_max_runs], last[k_fa_seen_max_runs];
-        const int n_runs = fa_seen_runs((const char *)mask, neq1, stride_m, nek1, first, last);
-        int n_blocks = 0;
-        for (int r = 0; r < n_runs; ++r) n_blocks += last[r] - first[r];
-        if (n_runs > 0 && (neq1 > 1 || size_t(n_blocks)*32*stride_k <= k_fa_seen_bytes_per_head*(neq2/nth))) {
-            return iqk_fa_seen_rows(int_type_k_in, int_type_v, Dk, Dv, neq1, neq2, n_runs, first, last,
-                    nbq2, stride_q, stride_k, stride_v, stride_m, ne1, nb1,
-                    (const char *)q, (const char *)k, (const char *)v, (const char *)mask, (const float *)sinks,
-                    scale, softcap, qkv, (char *)work_buffer_in, ith, nth);
-        }
     }
 
     if (n_swa > 0 && mask) {
