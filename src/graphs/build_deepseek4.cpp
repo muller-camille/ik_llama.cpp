@@ -2,6 +2,7 @@
 #include "../llama-context.h"
 #include "../llama-build-context.h"
 #include "../llama-dsv4.h"
+#include "../llama-spec-features-dflash.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1842,7 +1843,8 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
 
         inpL = build_mhc_post(cur, post, residual, comb, n_embd, hc, true);
         inpL = lctx.cvec.apply_to(ctx0, inpL, il);
-        if (lctx.dflash.capture) {
+        // the mean of the streams is for the draft model, which reads a few layers only
+        if (lctx.dflash.capture && llama_dflash_capture_layer_requested(lctx.dflash.capture->layer_ids, il)) {
             ggml_tensor * capture = dsv4_hc_mean_for_capture(ctx0, inpL);
             cb(capture, "l_out", il);
             ggml_build_forward_expand(gf, capture);
@@ -3020,7 +3022,8 @@ ggml_cgraph * llm_build_context::build_deepseek41() {
             inpL = ds4_build_engram(ctx0, *this, inpL, il, eg, engram_gate_mask);
         }
 
-        if (lctx.dflash.capture) {
+        // the mean of the streams is for the draft model, which reads a few layers only
+        if (lctx.dflash.capture && llama_dflash_capture_layer_requested(lctx.dflash.capture->layer_ids, il)) {
             ggml_tensor * capture = dsv4_hc_mean_for_capture(ctx0, inpL);
             cb(capture, "l_out", il);
             ggml_build_forward_expand(gf, capture);
