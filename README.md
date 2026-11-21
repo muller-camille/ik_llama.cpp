@@ -100,7 +100,7 @@ With `rhel8-b5317` and 32 threads, one optimization turned off at a time:
 | `GGML_SHARE_ROWS=0` | 22.2 | 30.1 |
 | `GGML_HC_PROJ=0` | 20.5 | 27.3 |
 
-Each figure is one run of 200 tokens, so the 2% of the row sharing needs more runs to be sure of. The draft was accepted at 74% in these runs (68% in the run with `GGML_HC_PROJ=0`, whose text differs), so its gain depends on the text.
+Each figure is the mean of 5 runs of 200 tokens, and the runs of one build differ by up to 3%, so the 2% of the row sharing is at the limit of what this shows. The draft was accepted at 74% in these runs (68% in the run with `GGML_HC_PROJ=0`, whose text differs), so its gain depends on the text.
 
 ### Where the time goes
 
