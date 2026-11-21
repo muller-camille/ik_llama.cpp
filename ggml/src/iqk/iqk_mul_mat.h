@@ -25,6 +25,19 @@ IQK_API bool iqk_mul_mat_4d(long Nx, long Ny, long ne00,
         int typeB, const void * B, long strideB,
         float * C, long stride_C, int ith, int nth);
 
+// A matrix product whose rows the threads take from each other when they are done with their own, so that
+// none waits for the slowest. A slot is IQK_SHARE_SLOT_SIZE bytes; a matrix has one per thread, slots[ith].
+//  - iqk_mul_mat_share_init(): every thread, for its own slot, before the threads synchronise. It returns
+//    false, for every thread alike, if the product is not computed this way.
+//  - iqk_mul_mat_share_run(): after that. With steal = 0 a thread computes the rows of its slot, with
+//    steal = 1 rows that the others have not started on. A is the thread's own copy of the weights.
+#define IQK_SHARE_SLOT_SIZE 64
+IQK_API bool iqk_mul_mat_share_init(void * slots, long Nx, long Ny, long ne00, int typeA, long strideA, int typeB, int ith, int nth);
+IQK_API bool iqk_mul_mat_share_run(void * slots, int steal, long Nx, long Ny, long ne00,
+        int typeA, const void * A, long strideA,
+        int typeB, const void * B, long strideB,
+        float * C, long stride_C, int ith, int nth);
+
 IQK_API bool iqk_mul_mat_moe(long Nx, long Ny, long ne00, int ne11,
         int typeA, const void * A, long strideA,
         int typeB, const void * B, long strideB,

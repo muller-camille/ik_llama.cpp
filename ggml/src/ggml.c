@@ -3317,6 +3317,10 @@ struct ggml_compute_state_shared {
 
     bool serial_nodes;             // thread 0 computes the small nodes alone (see ggml_node_is_serial)
 
+    // GGML_SHARE_MAX_MATS*n_threads slots for the matrix products whose rows the threads take from each other
+    // (see ggml_mul_mat_share_init), NULL: every thread keeps to its own rows
+    void * share;
+
     // Written by thread 0 only and read by all the others: on a cache line of its own.
     char pad0[64];
     atomic_int serial_node;        // thread 0 has reached this node: the serial nodes before it are computed
@@ -19247,6 +19251,74 @@ static inline uint32_t simple_gcd(uint32_t a, uint32_t b) {
     return a;
 }
 
+// the MUL_MAT node after node_n takes the same quantized src1: ggml_compute_forward_mul_mat computes it too
+static inline bool ggml_mul_mat_goes_with(const struct ggml_cgraph * cgraph, int node_n,
+        const struct ggml_tensor * src1, enum ggml_type vec_dot_type) {
+    return node_n < cgraph->n_nodes - 1 &&
+           cgraph->nodes[node_n+1]->op == GGML_OP_MUL_MAT &&
+           cgraph->nodes[node_n+1]->src[1] == src1 &&
+           cgraph->nodes[node_n+1]->src[0]->type != GGML_TYPE_F8_E4M3_KS &&
+           type_traits[cgraph->nodes[node_n+1]->src[0]->type].vec_dot_type == vec_dot_type;
+}
+
+// Matrix products whose rows the threads take from each other. The weights come from the memory at the same
+// speed for every thread on average, but not at every moment: with 32 threads a thread waits 13% of such a node
+// for the others. Here a thread that is done with its rows computes rows the others have not started on.
+// GGML_SHARE_ROWS=0 in the environment turns this off.
+#define GGML_SHARE_MAX_MATS 8
+
+static bool ggml_share_rows_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_SHARE_ROWS");
+        enabled = !(env && strcmp(env, "0") == 0);
+    }
+    return enabled;
+}
+
+#if GGML_USE_IQK_MULMAT
+static inline void * ggml_mul_mat_share_slots(const struct ggml_compute_params * params, int j) {
+    return (char *)params->shared->share + (size_t)j*params->nth*IQK_SHARE_SLOT_SIZE;
+}
+
+// Which of the matrices of dst and of the nodes computed with it are shared (bit j: matrix j, node_n + j).
+// Every thread calls this for its own slots before the threads synchronise.
+static uint32_t ggml_mul_mat_share_init(const struct ggml_compute_params * params, const struct ggml_tensor * dst,
+        const struct ggml_cgraph * cgraph, int node_n, enum ggml_type vec_dot_type) {
+    const struct ggml_tensor * src1 = dst->src[1];
+    if (!params->shared->share || params->nth < 2 || src1->ne[2] != 1 || src1->ne[3] != 1) {
+        return 0;
+    }
+    uint32_t mask = 0;
+    const struct ggml_tensor * cur = dst;
+    for (int j = 0; j < GGML_SHARE_MAX_MATS; ++j) {
+        const struct ggml_tensor * w = cur->src[0];
+        if (cur->type == GGML_TYPE_F32 && w->ne[2] == 1 && w->ne[3] == 1 && w->ne[0] == src1->ne[0] &&
+            iqk_mul_mat_share_init(ggml_mul_mat_share_slots(params, j), w->ne[1], src1->ne[1], w->ne[0],
+                    w->type, w->nb[1], vec_dot_type, params->ith, params->nth)) {
+            mask |= 1u << j;
+        }
+        if (!cgraph || dst->src[0]->type == GGML_TYPE_F8_E4M3_KS ||
+            !ggml_mul_mat_goes_with(cgraph, node_n + j, src1, vec_dot_type)) {
+            break;
+        }
+        cur = cgraph->nodes[node_n + j + 1];
+    }
+    return mask;
+}
+
+static void ggml_mul_mat_share_run(const struct ggml_compute_params * params, const struct ggml_tensor * dst, int j,
+        int steal, enum ggml_type vec_dot_type, const void * wdata, size_t row_size) {
+    const struct ggml_tensor * w = dst->src[0];
+    if (!iqk_mul_mat_share_run(ggml_mul_mat_share_slots(params, j), steal, w->ne[1], dst->src[1]->ne[1], w->ne[0],
+                w->type, ggml_numa_local(w->data, params->ith), w->nb[1],
+                vec_dot_type, wdata, row_size,
+                (float *)dst->data, dst->nb[1]/sizeof(float), params->ith, params->nth)) {
+        GGML_ABORT("fatal error");
+    }
+}
+#endif
+
 static int ggml_compute_forward_mul_mat(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst,
@@ -19302,6 +19374,9 @@ static int ggml_compute_forward_mul_mat(
     }
 #endif
 
+    // the matrices whose rows the threads take from each other, see ggml_mul_mat_share_init
+    uint32_t share_mask = 0;
+
     if (src1->type != vec_dot_type) {
         char * wdata = params->wdata;
 
@@ -19351,6 +19426,10 @@ static int ggml_compute_forward_mul_mat(
             }
         }
 
+#if GGML_USE_IQK_MULMAT
+        share_mask = ggml_mul_mat_share_init(params, dst, cgraph, node_n, vec_dot_type);
+#endif
+
         ggml_barrier(params->shared);
 
 #if IK_PRINT_TIMING
@@ -19364,30 +19443,41 @@ static int ggml_compute_forward_mul_mat(
 
     if (src1->type != vec_dot_type && dst->type == GGML_TYPE_F32) {
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
-        if (iqk_mul_mat_4d(ne01, ne11, ne00,
+        const int node_first = node_n;
+        bool done = true;
+        if (share_mask & 1) {
+            ggml_mul_mat_share_run(params, dst, 0, 0, vec_dot_type, wdata, row_size);
+        } else {
+            done = iqk_mul_mat_4d(ne01, ne11, ne00,
                     ne02, ne03, ne12, ne13, nb02, nb03, row_size*ne11, row_size*ne11*ne12,
                     nb2/sizeof(float), nb3/sizeof(float),
                     src0->type, ggml_numa_local(src0->data, ith), nb01,
                     vec_dot_type, wdata, row_size,
-                    (float *)dst->data, nb1/sizeof(float), ith, nth)) {
-            if (!cgraph || type == GGML_TYPE_F8_E4M3_KS) return node_n;
-            while (node_n < cgraph->n_nodes - 1 &&
-                   cgraph->nodes[node_n+1]->op == GGML_OP_MUL_MAT &&
-                   cgraph->nodes[node_n+1]->src[1] == src1 &&
-                   cgraph->nodes[node_n+1]->src[0]->type != GGML_TYPE_F8_E4M3_KS &&
-                   type_traits[cgraph->nodes[node_n+1]->src[0]->type].vec_dot_type == vec_dot_type) {
+                    (float *)dst->data, nb1/sizeof(float), ith, nth);
+        }
+        if (done) {
+            while (cgraph && type != GGML_TYPE_F8_E4M3_KS && ggml_mul_mat_goes_with(cgraph, node_n, src1, vec_dot_type)) {
                 struct ggml_tensor * dst_next  = cgraph->nodes[node_n+1];
                 struct ggml_tensor * src0_next = dst_next->src[0];
                 GGML_ASSERT(dst_next->type == GGML_TYPE_F32);
                 GGML_ASSERT(src0_next->ne[0] == ne00);
                 //if (ith == 0) printf("Fusing %s\n", src0_next->name);
-                if (!iqk_mul_mat_4d(src0_next->ne[1], ne11, ne00,
+                const int j = node_n + 1 - node_first;
+                if (j < GGML_SHARE_MAX_MATS && (share_mask >> j & 1)) {
+                    ggml_mul_mat_share_run(params, dst_next, j, 0, vec_dot_type, wdata, row_size);
+                } else if (!iqk_mul_mat_4d(src0_next->ne[1], ne11, ne00,
                     src0_next->ne[2], src0_next->ne[3], ne12, ne13, src0_next->nb[2], src0_next->nb[3], row_size*ne11, row_size*ne11*ne12,
                     dst_next->nb[2]/sizeof(float), dst_next->nb[3]/sizeof(float),
                     src0_next->type, ggml_numa_local(src0_next->data, ith), src0_next->nb[1],
                     vec_dot_type, wdata, row_size,
                     (float *)dst_next->data, dst_next->nb[1]/sizeof(float), ith, nth)) break;
                 ++node_n;
+            }
+            // done with its own rows of all these matrices, a thread takes rows the others have not started on
+            for (int j = 0; j < GGML_SHARE_MAX_MATS && node_first + j <= node_n; ++j) {
+                if (share_mask >> j & 1) {
+                    ggml_mul_mat_share_run(params, j == 0 ? dst : cgraph->nodes[node_first + j], j, 1, vec_dot_type, wdata, row_size);
+                }
             }
             return node_n;
         }
@@ -26405,7 +26495,7 @@ static void ggml_compute_forward_hc_proj_f32(
             for (int64_t t = 0; t < T; ++t) {
                 float d;
                 ggml_vec_dot_f32(n, &d, 0, wr, 0, (const float *)((const char *)xs + t*x->nb[2]), 0, 1);
-                part[t*(M + 1) + m] += d;
+                part[t*(M + 1) + m] += (double)d;
             }
         }
     }
@@ -26462,11 +26552,11 @@ static void ggml_compute_forward_hc_proj_tail(
             }
         }
         // as rms_norm computes it
-        const float mean  = acc[M]/n_in;
+        const float mean  = (float)(acc[M]/n_in);
         const float scale = 1.0f/sqrtf(mean + eps);
         float * y = (float *)dst->data + t*M;
         for (int m = 0; m < M; ++m) {
-            y[m] = (float)(acc[m]*scale);
+            y[m] = (float)(acc[m]*(double)scale);
         }
     }
 }
@@ -31676,6 +31766,7 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         /*.prof                    =*/ ggml_prof_begin(cgraph, n_threads),
         /*.prof_t0                 =*/ 0,
         /*.serial_nodes            =*/ ggml_serial_nodes_enabled(),
+        /*.share                   =*/ NULL,
         /*.pad0                    =*/ { 0 },
         /*.serial_node             =*/ 0,
         /*.pad1                    =*/ { 0 },
@@ -31683,6 +31774,18 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
     if (state_shared.prof) {
         state_shared.prof_t0 = ggml_prof_ns();
     }
+
+    // one cache line per thread and shared matrix, no range in any of them
+    void * share_buf = NULL;
+#if GGML_USE_IQK_MULMAT
+    if (n_threads > 1 && ggml_share_rows_enabled()) {
+        const size_t share_size = (size_t)GGML_SHARE_MAX_MATS*n_threads*IQK_SHARE_SLOT_SIZE;
+        share_buf = calloc(1, share_size + 64);
+        if (share_buf) {
+            state_shared.share = (void *)(((uintptr_t)share_buf + 63) & ~(uintptr_t)63);
+        }
+    }
+#endif
 
 #ifdef GGML_USE_OPENMP
     if (n_threads > 1) {
@@ -31751,6 +31854,8 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
     if (state_shared.prof) {
         ggml_prof_end(state_shared.prof, cgraph, ggml_prof_ns() - state_shared.prof_t0);
     }
+
+    free(share_buf);
 
     // don't leave affinity set on the main thread
     clear_numa_thread_affinity();
