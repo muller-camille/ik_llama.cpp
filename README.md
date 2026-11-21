@@ -17,7 +17,7 @@ This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik
 | `hc_proj` | The norm, the projection and the collapse of the DeepSeek-V4 hyper-connections in one node, each thread on the part of the streams it has just written. | `GGML_HC_PROJ=0` |
 | Even row split | The rows of `Q8_0_R8` matrices go to the threads in groups of 8, no thread more than one group above another; the expert rows are taken in smaller chunks. | |
 | Row sharing | A thread that is done with its rows of a large matrix product computes rows the others have not started on. The values do not depend on who computes them. | `GGML_SHARE_ROWS=0` |
-| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache, and each thread takes some of the heads, so there is nothing to combine between threads. | `GGML_FA_SKIP_MASKED=0` |
+| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache. The threads form a grid, groups of rows by groups of heads, sized so that a thread neither fetches all the rows nor combines many partial results; an index list that only repeats the mask is not gathered first. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_ROW_GROUPS=<n>` (1 = no groups of rows) |
 | Draft tokens beyond 256 tokens of context | There the attention of DeepSeek-V4 gets the cache rows of each query as a list, and each query went to one thread: with the 2 to 5 tokens of a draft step, the other threads had nothing to do. The threads of a query now share its heads. | |
 | Attention sinks for a token decoded alone | With one query token and one K/V head, two of the three ways the threads share the attention left the sinks out of the softmax: a token decoded alone did not get the result of the same token in a batch. They are applied everywhere now. | |
 | Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. | `GGML_PROFILE=1` |
@@ -32,9 +32,9 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5340/ik_llama-rhel8-b5340-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5340-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5340/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5342/ik_llama-rhel8-b5342-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5342-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5342/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
@@ -95,6 +95,16 @@ Measured on a server with 2 x 16 Sapphire Rapids cores and 8 DDR5 channels per s
 | `rhel8-b5301` | 64 | DSpark, `n_max=4` | 26.0 |
 | `rhel8-b5308` | 64 | DSpark, `n_max=4` | 25.9 |
 | `rhel8-b5317` | 32 | DSpark, `n_max=4` | 30.3 |
+
+`rhel8-b5340` (attention sinks for a token decoded alone, attention on the rows in view), 32 threads:
+
+| Prompt | Draft | Tokens/s | Attention per graph |
+|---|---|---|---|
+| short | | 22.9 | 1.9 ms |
+| short | DSpark, `n_max=4` | 31.1 | 2.9 ms for 3.3 tokens |
+| 3159 tokens | | 21.4 | 2.7 or 5.6 ms |
+
+With a context of a few thousand tokens the attention is the largest cost that is not reading weights. The text differs from `rhel8-b5317` because of the sinks, and with it the share of accepted draft tokens (63% here, 74% there): a draft step takes 74.4 ms instead of 78.3 ms, for about the same tokens/s on these texts.
 
 With `rhel8-b5317` and 32 threads, one optimization turned off at a time:
 

@@ -4,8 +4,8 @@
 //
 // A second part gives a cache with one K/V head a mask that leaves out most of the rows, in one or several
 // places, as a cache made of parts does, with and without the list of the rows of each query, and compares with a
-// sum written out here in double precision. GGML_FA_SKIP_MASKED=0 in the environment sends the cases without a list
-// the other way through the code.
+// sum written out here in double precision. GGML_FA_SKIP_MASKED=0 in the environment sends these cases the other
+// way through the code, and GGML_FA_ROW_GROUPS=<n> sets how many groups of rows the threads form.
 
 #include "ggml.h"
 

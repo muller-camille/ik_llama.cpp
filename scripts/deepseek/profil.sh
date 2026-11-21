@@ -11,8 +11,8 @@
 # Les passes comparent la version telle quelle (un thread par cœur physique) et la même avec une
 # optimisation coupée, d'abord après une question courte, puis après un texte d'environ 4000 tokens :
 # au-delà de 256 tokens de contexte, l'attention ne suit plus le même chemin dans le code.
-#   VARS       les optimisations à couper tour à tour, GGML_FA_SKIP_MASKED=0 par défaut
-#              (exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0 GGML_HC_PROJ=0")
+#   VARS       les optimisations à couper tour à tour, GGML_FA_ROW_GROUPS=1 par défaut
+#              (exemple : VARS="GGML_FA_ROW_GROUPS=1 GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0")
 #   CONTEXTE   taille du texte long en tokens, 4000 par défaut ; CONTEXTE=0 saute ces passes
 # Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe
 # à l'autre dès le premier token : il suffit que deux tokens soient presque à égalité et qu'un arrondi
@@ -49,7 +49,7 @@ DRAFT=${1:-}
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
 T=${T:-$COEURS}        # threads des passes principales
-VARS=${VARS-GGML_FA_SKIP_MASKED=0}
+VARS=${VARS-GGML_FA_ROW_GROUPS=1}
 CONTEXTE=${CONTEXTE:-4000}
 CTX=${CTX:-131072}
 SPEC=${SPEC:-dspark:n_max=4}
@@ -138,7 +138,10 @@ passe() {
     {
         printf '{"prompt":"'
         [ "$contexte" -le 0 ] || remplir "$contexte"
-        printf 'Write a long essay about the history of Paris.\\n\\n","n_predict":%d,"temperature":0,"cache_prompt":true}' "$N_PREDICT"
+        printf 'Write a long essay about the history of Paris.\\n\\n'
+        # after a long text, the title of the essay: without it the model goes on with the text
+        [ "$contexte" -le 0 ] || printf '# The History of Paris\\n\\n'
+        printf '","n_predict":%d,"temperature":0,"cache_prompt":true}' "$N_PREDICT"
     } > "$invite"
     local valeurs=()
     for i in $(seq 1 "$ESSAIS"); do
