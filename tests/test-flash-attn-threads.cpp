@@ -133,7 +133,11 @@ static bool sees(int layout, int iq, int n_q, int ik, int n_kv) {
 }
 
 // index: 0 = the mask alone, 1 = the mask and the list of the rows of each query, 2 = the lists alone
-static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv, int layout, bool with_sinks, bool k_is_v, int index_mode) {
+// n_split > 0: K, which is V then, is the concatenation of its first n_split rows and of the others, left undone
+// (ggml_flash_attn_ext_lazy_kv). The attention reads the two parts where they are, or makes the concatenation first.
+static int n_lazy = 0;
+static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv, int layout, bool with_sinks, bool k_is_v, int index_mode,
+        int n_split = 0) {
     const bool with_index = index_mode != 0;
     ggml_init_params ip = { (size_t) 1 << 30, nullptr, false };
     ggml_context * ctx = ggml_init(ip);
@@ -145,6 +149,15 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
     }
     ggml_tensor * k = new_cache(ctx, type_kv, D, n_kv, 1);
     ggml_tensor * v = k_is_v ? k : new_cache(ctx, type_kv, D, n_kv, 1);
+    // the two parts, each with rows of its own
+    ggml_tensor * part[2] = { nullptr, nullptr };
+    if (n_split > 0) {
+        const size_t row = ggml_row_size(type_kv, D);
+        part[0] = ggml_new_tensor_4d(ctx, type_kv, D, 1, n_split, 1);
+        part[1] = ggml_new_tensor_4d(ctx, type_kv, D, 1, n_kv - n_split, 1);
+        memcpy(part[0]->data, k->data, row*n_split);
+        memcpy(part[1]->data, (const char *) k->data + row*n_split, row*(n_kv - n_split));
+    }
     ggml_tensor * sinks = nullptr;
     if (with_sinks) {
         sinks = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_head);
@@ -233,12 +246,23 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
             fprintf(stderr, "masked: %s head size %d, %d heads, %d query row(s), cache %d, layout %d, %d threads\n",
                     ggml_type_name(type_kv), D, n_head, n_q, n_kv, layout, n_threads);
         }
-        ggml_tensor * y = ggml_flash_attn_ext(ctx, q, k, v, index_mode == 2 ? nullptr : mask, scale, 0.0f, 0.0f);
+        ggml_tensor * kk = k, * vv = v, * cat = nullptr;
+        if (n_split > 0) {
+            cat = ggml_concat(ctx, part[0], part[1], 2);
+            kk  = ggml_permute(ctx, cat, 0, 2, 1, 3);
+            vv  = ggml_permute(ctx, cat, 0, 2, 1, 3);
+        }
+        ggml_tensor * y = ggml_flash_attn_ext(ctx, q, kk, vv, index_mode == 2 ? nullptr : mask, scale, 0.0f, 0.0f);
         if (sinks) {
             ggml_flash_attn_ext_add_sinks(y, sinks);
         }
         if (index) {
             y->src[5] = index;
+        }
+        if (cat && ggml_flash_attn_ext_lazy_kv(y)) {
+            // nobody may read the rows at the place of the concatenation unless the attention has put them there
+            memset(cat->data, 0xff, ggml_nbytes(cat));
+            n_lazy++;
         }
         ggml_cgraph * gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, y);
@@ -259,9 +283,10 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
         }
     }
     if (!bad.empty()) {
-        fprintf(stderr, "FAILED: masked %s head size %3d, %2d heads, %d query row(s), cache %4d, layout %d%s%s%s:%s\n",
+        fprintf(stderr, "FAILED: masked %s head size %3d, %2d heads, %d query row(s), cache %4d, layout %d%s%s%s%s:%s\n",
                 ggml_type_name(type_kv), D, n_head, n_q, n_kv, layout, with_sinks ? ", sinks" : "", k_is_v ? ", K == V" : "",
-                index_mode == 1 ? ", index list" : index_mode == 2 ? ", index list alone" : "", bad.c_str());
+                index_mode == 1 ? ", index list" : index_mode == 2 ? ", index list alone" : "",
+                n_split > 0 ? (", in two parts, the first of " + std::to_string(n_split) + " rows").c_str() : "", bad.c_str());
         n_fail++;
     }
     ggml_free(ctx);
@@ -326,6 +351,20 @@ int main(int argc, char ** argv) {
         test_masked(GGML_TYPE_F16, 512, 64, n_q, 9216, 4, n_q == 1, true, 2);
         ++n_tests;
     }
-    printf("%d of %d cases failed\n", n_fail, n_tests);
+    // K and V in two parts that are not put together: the first part ends at a whole block of 32 rows or not, the
+    // rows in view lie in one part or in both, and with 9 query rows the kernels do not read through at all
+    for (int n_q : { 1, 3, 5, 9 }) {
+        for (int n_kv : { 768, 2048 }) {
+            for (int n_split : { 256, 352, 250 }) {
+                for (int layout : { 0, 1, 4 }) {
+                    for (int index_mode = 0; index_mode < 3; ++index_mode) {
+                        test_masked(GGML_TYPE_F16, 512, 64, n_q, n_kv, layout, (n_q + layout) % 2 == 0, true, index_mode, n_split);
+                        ++n_tests;
+                    }
+                }
+            }
+        }
+    }
+    printf("%d of %d cases failed (%d attention nodes had their cache in two parts)\n", n_fail, n_tests, n_lazy);
     return n_fail ? 1 : 0;
 }

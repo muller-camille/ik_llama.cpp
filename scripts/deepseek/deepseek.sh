@@ -10,7 +10,8 @@
 #   PORT     8080
 #   P        préfixe du modèle à charger, DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8 par défaut
 #   M        préfixe du modèle à lancer, P par défaut ; ...-R8Q6 pour le modèle de recompresser.sh
-#   DRAFT    fichier du drafter dans NFS, vide = sans drafter
+#   DRAFT    fichier du drafter dans NFS, vide = sans drafter ; par défaut dspark-...-Q8_0-R8.gguf s'il y
+#            est (le drafter converti, lu plus vite), sinon dspark-...-Q8_0.gguf
 #   SPEC     réglage du drafter, dspark:n_max=4 par défaut
 #   T        threads, un par cœur physique par défaut
 #   CTX      contexte, 131072 par défaut
@@ -50,7 +51,11 @@ COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 NFS=${NFS:?"Indiquez le dossier des fichiers convertis : NFS=... dans ~/.deepseek.conf ou devant la commande"}
 P=${P:-DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8}
 M=${M:-$P}
-DRAFT=${DRAFT-dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf}
+# le drafter : sa conversion (llama-quantize --repack ... Q8_0_R8) si elle est dans NFS, sinon l'original
+if [ -z "${DRAFT+x}" ]; then
+    DRAFT=dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf
+    [ ! -f "$NFS/${DRAFT%.gguf}-R8.gguf" ] || DRAFT=${DRAFT%.gguf}-R8.gguf
+fi
 SPEC=${SPEC:-dspark:n_max=4}
 API_KEY=${API_KEY:-}
 HOST=${HOST:-127.0.0.1}

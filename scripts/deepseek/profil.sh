@@ -1,8 +1,8 @@
 #!/bin/bash
 # Chronomètre les opérations du modèle sur cette machine, pour savoir où part le temps.
 #
-#   ./profil.sh                      quatre passes sans drafter
-#   ./profil.sh <fichier drafter>    quatre passes de plus, avec le drafter
+#   ./profil.sh                      six passes sans drafter
+#   ./profil.sh <fichier drafter>    six passes de plus, avec le drafter
 #
 # Le script mesure la version dans laquelle il se trouve. Un dossier ik_llama en premier argument en
 # choisit une autre : ./profil.sh <dossier ik_llama> [fichier drafter]
@@ -11,10 +11,13 @@
 # Les passes comparent la version telle quelle (un thread par cœur physique) et la même avec un réglage
 # changé, d'abord après une question courte, puis après un texte d'environ 4000 tokens : au-delà de
 # 256 tokens de contexte, l'attention ne suit plus le même chemin dans le code.
-#   VARS       les réglages à essayer tour à tour, GGML_FA_ROW_GROUPS=-1 par défaut : la grille de threads
-#              de l'attention est tirée au sort à chaque nœud, et le chronométrage dit ce que chacune a
-#              coûté (les tokens/s de ces passes ne se comparent donc pas aux autres)
-#              (exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0" coupe ces optimisations tour à tour)
+#   VARS       les réglages à essayer tour à tour, par défaut "GGML_LAZY_CONCAT=0 GGML_FA_ROW_GROUPS=-1" :
+#              - GGML_LAZY_CONCAT=0 recopie le cache en un bloc avant l'attention, comme avant ;
+#              - GGML_FA_ROW_GROUPS=-1 tire au sort la grille de threads de l'attention à chaque nœud, et le
+#                chronométrage dit ce que chacune a coûté (les tokens/s de ces passes ne se comparent donc
+#                pas aux autres)
+#              (autre exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0" coupe ces optimisations tour à tour ;
+#              VARS= ne fait que les quatre passes de base)
 #   CONTEXTE   taille du texte long en tokens, 4000 par défaut ; CONTEXTE=0 saute ces passes
 # Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe
 # à l'autre dès le premier token : il suffit que deux tokens soient presque à égalité et qu'un arrondi
@@ -55,7 +58,7 @@ DRAFT=${1:-}
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
 T=${T:-$COEURS}        # threads des passes principales
-VARS=${VARS-GGML_FA_ROW_GROUPS=-1}
+VARS=${VARS-GGML_LAZY_CONCAT=0 GGML_FA_ROW_GROUPS=-1}
 CONTEXTE=${CONTEXTE:-4000}
 CTX=${CTX:-131072}
 SPEC=${SPEC:-dspark:n_max=4}

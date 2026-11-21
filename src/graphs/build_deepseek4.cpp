@@ -606,7 +606,8 @@ static ggml_tensor * dsv4_build_attn(
         int            il,
         int            n_compressed,
         ggml_cgraph  * gf,
-        ggml_tensor  * kv_idx = nullptr) {
+        ggml_tensor  * kv_idx = nullptr,
+        bool           lazy_kv = false) {   // k and v are one concatenation that nothing else reads, on the CPU alone
     const bool v_trans = v->nb[1] > v->nb[2];
     const int64_t n_stream = k->ne[3];
 
@@ -687,6 +688,11 @@ static ggml_tensor * dsv4_build_attn(
         }
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
+        if (lazy_kv) {
+            // The raw rows and the compressed ones are not copied next to each other for this node: it reads them
+            // where they are. With a long context that copy is all the compressed rows, at every step.
+            ggml_flash_attn_ext_lazy_kv(cur);
+        }
         ggml_build_forward_expand(gf, cur);
         return ggml_reshape_2d(ctx, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
     }
@@ -1493,8 +1499,10 @@ static ggml_tensor * ds4_attention(ggml_cgraph * gf, ggml_context * ctx0, llm_bu
             cb(kq_mask, (tag + "_kq_mask").c_str(), il);
         }
 
+        // k_all is read by this attention node alone
+        const bool cpu_alone = lctx.backends.size() == 1 && lctx.backends.front() == lctx.backend_cpu;
         auto attn = dsv4_build_attn(ctx0, hparams, cparams, q, k_all, k_all, kq_mask,
-                model.layers[il].attn_sinks, kq_scale, cb, il, n_swa_eff, gf, kv_idx);
+                model.layers[il].attn_sinks, kq_scale, cb, il, n_swa_eff, gf, kv_idx, cpu_alone);
         return attn;
     };
 
@@ -2439,8 +2447,10 @@ static ggml_tensor * ds4_attention_v41(ggml_cgraph * gf, ggml_context * ctx0, ll
             cb(kq_mask, (tag + "_kq_mask").c_str(), il);
         }
 
+        // k_all is read by this attention node alone
+        const bool cpu_alone = lctx.backends.size() == 1 && lctx.backends.front() == lctx.backend_cpu;
         auto attn = dsv4_build_attn(ctx0, hparams, cparams, q, k_all, k_all, kq_mask,
-                model.layers[il].attn_sinks, kq_scale, cb, il, n_swa_eff, gf, kv_idx);
+                model.layers[il].attn_sinks, kq_scale, cb, il, n_swa_eff, gf, kv_idx, cpu_alone);
         return attn;
     };
 

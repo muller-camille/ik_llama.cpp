@@ -3,7 +3,8 @@
 # par socket. À lancer en root après un redémarrage : sudo ./charger-deepseek.sh
 #
 # Réglages, dans ~/.deepseek.conf ou en variables : NFS (dossier des fichiers, obligatoire), P (préfixe du
-# modèle), DRAFT (fichier du drafter dans NFS, vide = aucun).
+# modèle), DRAFT (fichier du drafter dans NFS, vide = aucun ; par défaut le drafter converti ...-Q8_0-R8.gguf
+# s'il est dans NFS, sinon l'original).
 set -euo pipefail
 
 # --- réglages --------------------------------------------------------------
@@ -34,7 +35,11 @@ COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 [ "$COEURS" -gt 0 ] 2>/dev/null || COEURS=$(nproc)
 NFS=${NFS:?"Indiquez le dossier des fichiers convertis : NFS=... dans ~/.deepseek.conf ou devant la commande"}
 P=${P:-DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8}
-DRAFT=${DRAFT-dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf}
+# le drafter : sa conversion (llama-quantize --repack ... Q8_0_R8) si elle est dans NFS, sinon l'original
+if [ -z "${DRAFT+x}" ]; then
+    DRAFT=dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf
+    [ ! -f "$NFS/${DRAFT%.gguf}-R8.gguf" ] || DRAFT=${DRAFT%.gguf}-R8.gguf
+fi
 
 [ "$(id -u)" -eq 0 ] || { echo "À lancer en root (sudo)."; exit 1; }
 for f in "$NFS/$P-00001-of-00009.gguf" "$NFS/$P-00008-of-00009.gguf" ${DRAFT:+"$NFS/$DRAFT"}; do

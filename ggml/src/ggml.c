@@ -11824,6 +11824,59 @@ void ggml_flash_attn_ext_add_sinks(
     a->src[4] = sinks;
 }
 
+// The concatenation that both K and V of an attention node are views of, when it has the form the attention can
+// read through: rows along dim 2 of a [D, 1, rows, 1] tensor, K and V the whole of it as [D, rows, 1, 1], the two
+// parts with their rows in one piece each.
+static struct ggml_tensor * ggml_flash_attn_ext_kv_concat(const struct ggml_tensor * a) {
+    if (a->op != GGML_OP_FLASH_ATTN_EXT) {
+        return NULL;
+    }
+    const struct ggml_tensor * k = a->src[1];
+    const struct ggml_tensor * v = a->src[2];
+    struct ggml_tensor * cat = k->view_src;
+    if (cat == NULL || v->view_src != cat || cat->op != GGML_OP_CONCAT || ggml_get_op_params_i32(cat, 0) != 2) {
+        return NULL;
+    }
+    if (cat->ne[1] != 1 || cat->ne[3] != 1 || cat->type != k->type || cat->type != v->type || ggml_is_quantized(cat->type)) {
+        return NULL;
+    }
+    const size_t type_size = ggml_type_size(cat->type);
+    const struct ggml_tensor * kv[2] = { k, v };
+    for (int i = 0; i < 2; ++i) {
+        const struct ggml_tensor * t = kv[i];
+        if (t->view_offs != 0 || t->ne[0] != cat->ne[0] || t->ne[1] != cat->ne[2] || t->ne[2] != 1 || t->ne[3] != 1 ||
+            t->nb[0] != type_size || t->nb[1] != cat->nb[2]) {
+            return NULL;
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        const struct ggml_tensor * part = cat->src[i];
+        if (part->ne[0] != cat->ne[0] || part->ne[1] != 1 || part->ne[3] != 1 || part->nb[0] != type_size || part->type != cat->type) {
+            return NULL;
+        }
+    }
+    return cat;
+}
+
+static bool ggml_lazy_concat_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_LAZY_CONCAT");
+        enabled = !(env && strcmp(env, "0") == 0);
+    }
+    return enabled;
+}
+
+bool ggml_flash_attn_ext_lazy_kv(struct ggml_tensor * a) {
+    struct ggml_tensor * cat = ggml_flash_attn_ext_kv_concat(a);
+    if (cat == NULL || !ggml_lazy_concat_enabled()) {
+        return false;
+    }
+    // op_params[1] of a concatenation: left to the attention node that reads it
+    ggml_set_op_params_i32(cat, 1, 1);
+    return true;
+}
+
 // ggml_flash_attn_back
 
 struct ggml_tensor * ggml_flash_attn_back(
@@ -16986,7 +17039,21 @@ static void ggml_compute_forward_concat_any(
     }
 }
 
+static void ggml_compute_forward_concat_now(
+    const struct ggml_compute_params * params,
+    struct ggml_tensor * dst);
+
 static void ggml_compute_forward_concat(
+    const struct ggml_compute_params * params,
+    struct ggml_tensor * dst) {
+    if (ggml_get_op_params_i32(dst, 1) == 1) {
+        // left to the attention node that reads it (ggml_flash_attn_ext_lazy_kv)
+        return;
+    }
+    ggml_compute_forward_concat_now(params, dst);
+}
+
+static void ggml_compute_forward_concat_now(
     const struct ggml_compute_params * params,
     struct ggml_tensor * dst) {
 
@@ -24535,17 +24602,40 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     // For now we do not implement sinks in the iqk FA implementation
     // DSV4 marks its FA nodes with the shared generic-FA backend hint.
     const bool use_iqk_fa = dst->op_params[4] != GGML_FLASH_ATTN_EXT_IQK_DISABLED;
-    if (use_iqk_fa && iqk_flash_attn_noalibi(q->type, mask ? mask->type : GGML_TYPE_F16, max_bias,
-                q->ne[3], q->ne[2], q->nb[3], q->nb[2],
-                k->ne[3], k->ne[2], k->nb[3], k->nb[2],
-                v->ne[3], v->ne[2], v->nb[3], v->nb[2],
-                dst->ne[2], dst->ne[1], dst->nb[1],
-                k->type, v->type,
-                Dk, Dv, neq1, nek1, q->nb[1], k->nb[1], v->nb[1], mask ? mask->nb[1] : 0,
-                q->data, k->data, v->data, mask ? mask->data : NULL, sinks ? sinks->data : NULL,
-                scale, softcap, (float *)dst->data,
-                params->wdata, (barrier_t)ggml_barrier, (void *)params->shared, ith, nth, dst->op_params[4],
-                dst->src[5])) return;
+
+    // K and V may be a concatenation that was left undone (ggml_flash_attn_ext_lazy_kv). The kernels are first
+    // asked to read its two parts where they are. All the threads get the same answer; when it is no, each makes
+    // its share of the concatenation, and after a barrier the node goes on as if it had been there all along.
+    struct ggml_tensor * k_cat = ggml_flash_attn_ext_kv_concat(dst);
+    if (k_cat != NULL && ggml_get_op_params_i32(k_cat, 1) != 1) {
+        k_cat = NULL;
+    }
+    struct iqk_fa_two_parts two_parts;
+    if (k_cat != NULL) {
+        two_parts.k0      = k_cat->src[0]->data;
+        two_parts.stride0 = (long)k_cat->src[0]->nb[2];
+        two_parts.n0      = (int)k_cat->src[0]->ne[2];
+        two_parts.k1      = k_cat->src[1]->data;
+        two_parts.stride1 = (long)k_cat->src[1]->nb[2];
+    }
+    for (int attempt = 0; attempt < (k_cat != NULL ? 2 : 1); ++attempt) {
+        const bool through = k_cat != NULL && attempt == 0;
+        if (use_iqk_fa && iqk_flash_attn_noalibi(q->type, mask ? mask->type : GGML_TYPE_F16, max_bias,
+                    q->ne[3], q->ne[2], q->nb[3], q->nb[2],
+                    k->ne[3], k->ne[2], k->nb[3], k->nb[2],
+                    v->ne[3], v->ne[2], v->nb[3], v->nb[2],
+                    dst->ne[2], dst->ne[1], dst->nb[1],
+                    k->type, v->type,
+                    Dk, Dv, neq1, nek1, q->nb[1], k->nb[1], v->nb[1], mask ? mask->nb[1] : 0,
+                    q->data, k->data, v->data, mask ? mask->data : NULL, sinks ? sinks->data : NULL,
+                    scale, softcap, (float *)dst->data,
+                    params->wdata, (barrier_t)ggml_barrier, (void *)params->shared, ith, nth, dst->op_params[4],
+                    dst->src[5], through ? &two_parts : NULL)) return;
+        if (through) {
+            ggml_compute_forward_concat_now(params, k_cat);
+            ggml_barrier(params->shared);
+        }
+    }
 
 //    if (max_bias <= 0.0f && q->type == GGML_TYPE_F32 && mask && mask->type == GGML_TYPE_F16) {
 //        //if (ith == 0) printf("k: %ld x %ld x %ld, q: %ld x %ld x %ld, v: %ld x %ld x %ld mask: %ld x %ld x %ld\n",
@@ -30679,6 +30769,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         // no need to multi-thread a no-op
         n_tasks = 1;
         return n_tasks;
+    }
+    if (node->op == GGML_OP_CONCAT && ggml_get_op_params_i32(node, 1) == 1) {
+        // left to the attention node that reads it: nothing is computed here
+        return 1;
     }
 
     switch (node->op) {
