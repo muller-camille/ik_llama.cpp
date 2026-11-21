@@ -133,6 +133,9 @@ llama_test(test-numa-mirror)
 
 llama_build(test-flash-attn-threads.cpp)
 llama_test(test-flash-attn-threads)
+# the same cases with every cache row given to the kernels
+llama_test(test-flash-attn-threads NAME test-flash-attn-threads-all-rows)
+set_tests_properties(test-flash-attn-threads-all-rows PROPERTIES ENVIRONMENT "GGML_FA_SKIP_MASKED=0")
 
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)
