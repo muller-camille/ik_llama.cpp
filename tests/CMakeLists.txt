@@ -137,6 +137,8 @@ llama_test(test-flash-attn-threads)
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-all-rows)
 set_tests_properties(test-flash-attn-threads-all-rows PROPERTIES ENVIRONMENT "GGML_FA_SKIP_MASKED=0")
 # and with the rows in view in 2 and in 4 groups, whatever the estimate of the time says
+llama_test(test-flash-attn-threads NAME test-flash-attn-threads-1-row-group)
+set_tests_properties(test-flash-attn-threads-1-row-group PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=1")
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-2-row-groups)
 set_tests_properties(test-flash-attn-threads-2-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=2")
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-4-row-groups)

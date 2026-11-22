@@ -8,6 +8,8 @@
 // way through the code, and GGML_FA_ROW_GROUPS=<n> sets how many groups of rows the threads form.
 
 #include "ggml.h"
+#include "ggml-alloc.h"
+#include "ggml-backend.h"
 
 #include <cmath>
 #include <cstdio>
@@ -292,8 +294,120 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
     ggml_free(ctx);
 }
 
+// The two parts of K as the graph of a model has them: results of nodes, in memory that the allocator of the graph
+// hands out, and takes back once a tensor has no reader left. The attention node reads the parts after the
+// concatenation that was left undone, which is their only other reader. Unless it names them as its own sources,
+// their memory is free by then, and the first tensor to be put there is the result of the node itself: with one
+// row group a thread writes the result of a query row before it reads the rows of the next one. That is how a
+// server ended in NaN after a prompt of 20000 tokens (the last five tokens of a prompt are decoded together).
+static void test_allocated(int n_q, int n_kv, int n_split) {
+    const int D = 512, n_head = 64, layout = 4;
+    ggml_init_params ip_in = { (size_t) 1 << 28, nullptr, false };
+    ggml_context * ctx_in = ggml_init(ip_in);
+
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    ggml_tensor * q = ggml_new_tensor_3d(ctx_in, GGML_TYPE_F32, D, n_q, n_head);
+    for (int64_t i = 0; i < ggml_nelements(q); ++i) {
+        ((float *) q->data)[i] = nd(rng);
+    }
+    ggml_tensor * src[2] = {
+        ggml_new_tensor_4d(ctx_in, GGML_TYPE_F16, D, 1, n_split, 1),
+        ggml_new_tensor_4d(ctx_in, GGML_TYPE_F16, D, 1, n_kv - n_split, 1),
+    };
+    for (ggml_tensor * t : src) {
+        for (int64_t i = 0; i < ggml_nelements(t); ++i) {
+            ((ggml_fp16_t *) t->data)[i] = ggml_fp32_to_fp16(nd(rng));
+        }
+    }
+    const int n_idx = GGML_PAD(48 + (n_kv - 256)/5, 32);
+    ggml_tensor * index = ggml_new_tensor_2d(ctx_in, GGML_TYPE_I32, n_idx, GGML_PAD(n_q, 16));
+    for (int iq = 0; iq < (int) index->ne[1]; ++iq) {
+        int32_t * id = (int32_t *) index->data + (size_t) iq*n_idx;
+        int n = 0;
+        for (int ik = 0; ik < n_kv && n < n_idx; ++ik) {
+            if (iq < n_q && sees(layout, iq, n_q, ik, n_kv)) {
+                id[n++] = ik;
+            }
+        }
+        while (n < n_idx) {
+            id[n++] = -1;
+        }
+    }
+    const float scale = 1.0f/std::sqrt((float) D);
+
+    // parts are graph results when `allocated`, tensors with memory of their own otherwise: the cases above
+    auto attention = [&](ggml_context * ctx, bool allocated) {
+        ggml_tensor * part[2] = { src[0], src[1] };
+        if (allocated) {
+            part[0] = ggml_dup(ctx, src[0]);
+            part[1] = ggml_dup(ctx, src[1]);
+        }
+        ggml_tensor * cat = ggml_concat(ctx, part[0], part[1], 2);
+        ggml_tensor * kk  = ggml_permute(ctx, cat, 0, 2, 1, 3);
+        ggml_tensor * y   = ggml_flash_attn_ext(ctx, q, kk, kk, nullptr, scale, 0.0f, 0.0f);
+        y->src[5] = index;
+        if (ggml_flash_attn_ext_lazy_kv(y)) {
+            n_lazy++;
+        }
+        return y;
+    };
+
+    std::string bad;
+    for (int n_threads : { 1, 4, 32 }) {
+        ggml_tensor * y_ref = attention(ctx_in, false);
+        ggml_cgraph * gf_ref = ggml_new_graph(ctx_in);
+        ggml_build_forward_expand(gf_ref, y_ref);
+        ggml_graph_compute_with_ctx(ctx_in, gf_ref, n_threads);
+
+        ggml_init_params ip = { ggml_tensor_overhead()*16 + ggml_graph_overhead(), nullptr, true };
+        ggml_context * ctx = ggml_init(ip);
+        ggml_tensor * y = attention(ctx, true);
+        ggml_cgraph * gf = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gf, y);
+        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+        ggml_gallocr_alloc_graph(galloc, gf);
+        ggml_cplan plan = ggml_graph_plan(gf, n_threads);
+        std::vector<uint8_t> work(plan.work_size);
+        plan.work_data = work.data();
+        ggml_graph_compute(gf, &plan);
+
+        const float * p = (const float *) y->data, * r = (const float *) y_ref->data;
+        double num = 0, den = 0;
+        bool finite = true;
+        for (int64_t i = 0; i < ggml_nelements(y); ++i) {
+            finite = finite && std::isfinite(p[i]);
+            num += (double) (p[i] - r[i])*(p[i] - r[i]);
+            den += (double) r[i]*r[i];
+        }
+        const double err = den > 0 ? std::sqrt(num/den) : std::sqrt(num);
+        if (!finite || !(err < 1e-5)) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), " [%d threads: %.1e]", n_threads, finite ? err : NAN);
+            bad += buf;
+        }
+        ggml_gallocr_free(galloc);
+        ggml_free(ctx);
+    }
+    if (!bad.empty()) {
+        fprintf(stderr, "FAILED: parts in memory of the graph, %d query row(s), cache %d, the first part of %d rows:%s\n",
+                n_q, n_kv, n_split, bad.c_str());
+        n_fail++;
+    }
+    ggml_free(ctx_in);
+}
+
 int main(int argc, char ** argv) {
     verbose = argc > 1 && strcmp(argv[1], "-v") == 0;
+    if (argc > 1 && strcmp(argv[1], "--allocated") == 0) {
+        // these cases alone: they take a second
+        for (int n_q : { 1, 5 }) {
+            for (int n_split : { 704, 160 }) {
+                test_allocated(n_q, 2048, n_split);
+            }
+        }
+        printf("%d of 4 cases failed (%d attention nodes had their cache in two parts)\n", n_fail, n_lazy);
+        return n_fail ? 1 : 0;
+    }
     struct shape { ggml_type type; int D, n_head, n_head_kv; };
     const shape shapes[] = {
         { GGML_TYPE_F16,   48,  6,  6 }, // no IQK kernel for this head size
@@ -373,6 +487,14 @@ int main(int argc, char ** argv) {
                 test_masked(GGML_TYPE_F16, 512, 64, n_q, 12800, 4, (n_q + index_mode) % 2 == 0, true, index_mode, n_split);
                 ++n_tests;
             }
+        }
+    }
+    // the two parts in memory that the allocator of a graph hands out: the result of the node fits where the
+    // first part is (704 rows), or only where the second one is (160 rows first)
+    for (int n_q : { 1, 5 }) {
+        for (int n_split : { 704, 160 }) {
+            test_allocated(n_q, 2048, n_split);
+            ++n_tests;
         }
     }
     printf("%d of %d cases failed (%d attention nodes had their cache in two parts)\n", n_fail, n_tests, n_lazy);
