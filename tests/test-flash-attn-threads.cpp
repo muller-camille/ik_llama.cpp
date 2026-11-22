@@ -365,6 +365,16 @@ int main(int argc, char ** argv) {
             }
         }
     }
+    // the same over a long cache: the last tokens of a long prompt are decoded a few at a time, each on the rows
+    // of its list, raw rows in one part and all the compressed rows of the context in the other
+    for (int n_q : { 1, 3, 5 }) {
+        for (int n_split : { 256, 250 }) {
+            for (int index_mode = 1; index_mode < 3; ++index_mode) {
+                test_masked(GGML_TYPE_F16, 512, 64, n_q, 12800, 4, (n_q + index_mode) % 2 == 0, true, index_mode, n_split);
+                ++n_tests;
+            }
+        }
+    }
     printf("%d of %d cases failed (%d attention nodes had their cache in two parts)\n", n_fail, n_tests, n_lazy);
     return n_fail ? 1 : 0;
 }
