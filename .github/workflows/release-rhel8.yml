@@ -332,7 +332,8 @@ jobs:
         run: |
           mkdir pkg
           tar -xzf "ik_llama-${TAG}-bin-rhel8-x64.tar.gz" -C pkg
-          cp models/templates/deepseek-ai-DeepSeek-V4.1.jinja pkg/
+          # the template that Unsloth's GGUF files of DeepSeek-V4.1 carry: the one a server of the model works with
+          cp models/templates/unsloth-DeepSeek-V4.1-Flash-1017.jinja pkg/
           curl -fsSL --retry 3 -o pkg/stories15M-q4_0.gguf "$TEST_MODEL_URL"
           docker run --rm -i -v "$PWD/pkg:/pkg:ro" -w "/pkg/ik_llama-${TAG}" -e TAG -e NODE_VERSION -e DSH_VERSION "$TEST_IMAGE" bash -e -s <<'EOF'
           cat /etc/redhat-release
@@ -342,7 +343,7 @@ jobs:
           npm install -g --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}" > /tmp/npm.log 2>&1 || { tail -40 /tmp/npm.log; exit 1; }
           dsh --version
 
-          ./llama-server -m /pkg/stories15M-q4_0.gguf --jinja --chat-template-file /pkg/deepseek-ai-DeepSeek-V4.1.jinja \
+          ./llama-server -m /pkg/stories15M-q4_0.gguf --jinja --chat-template-file /pkg/unsloth-DeepSeek-V4.1-Flash-1017.jinja \
               --api-key sk-test --port 8080 -c 32768 -n 32 -t 2 > /tmp/server.log 2>&1 &
           for i in $(seq 60); do curl -sf http://127.0.0.1:8080/health > /dev/null && break; sleep 1; done
           curl -sf http://127.0.0.1:8080/health

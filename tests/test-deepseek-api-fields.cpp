@@ -90,20 +90,35 @@ int main() {
         check(k.size() == 1 && k["enable_thinking"] == "false", "thinking disabled");
         k = kwargs_of(R"({"thinking": {"type": "enabled"}, "reasoning_effort": "max"})");
         check(k.size() == 2 && k["enable_thinking"] == "true" && k["reasoning_effort"] == "\"max\"", "thinking enabled, effort max");
+        k = kwargs_of(R"({"thinking": {"type": "adaptive"}})");
+        check(k.size() == 1 && k["enable_thinking"] == "true", "adaptive is enabled");
+        // without "thinking", the effort decides: none turns the reasoning off, any other turns it on
         k = kwargs_of(R"({"reasoning_effort": 40})");
-        check(k.size() == 1 && k["reasoning_effort"] == "40", "effort as a number");
+        check(k.size() == 2 && k["reasoning_effort"] == "40" && k["enable_thinking"] == "true", "effort as a number");
         k = kwargs_of(R"({"reasoning_effort": "none"})");
         check(k.size() == 1 && k["enable_thinking"] == "false", "effort none turns the reasoning off");
-        // a budget of Anthropic's API, another type, no field at all: nothing changes
-        k = kwargs_of(R"({"thinking": {"type": "adaptive"}, "reasoning_effort": null, "messages": []})");
+        // with "thinking", it decides
+        k = kwargs_of(R"({"thinking": {"type": "enabled"}, "reasoning_effort": "none"})");
+        check(k.size() == 1 && k["enable_thinking"] == "true", "thinking enabled over effort none");
+        k = kwargs_of(R"({"thinking": {"type": "disabled"}, "reasoning_effort": "max"})");
+        check(k["enable_thinking"] == "false", "thinking disabled over an effort");
+        // another type, no value, no field at all: nothing changes
+        k = kwargs_of(R"({"thinking": {"type": "sometimes"}, "reasoning_effort": null, "messages": []})");
         check(k.empty(), "fields that say nothing");
         // what the command line gave stays where the request says nothing
         k = { { "enable_thinking", "false" }, { "reasoning_effort", "\"low\"" } };
+        common_chat_reasoning_kwargs_parse_oaicompat(json::parse(R"({"messages": []})"), k);
+        check(k["enable_thinking"] == "false" && k["reasoning_effort"] == "\"low\"", "the command line where the request is silent");
         common_chat_reasoning_kwargs_parse_oaicompat(json::parse(R"({"reasoning_effort": "high"})"), k);
-        check(k["enable_thinking"] == "false" && k["reasoning_effort"] == "\"high\"", "the request over the command line");
+        check(k["enable_thinking"] == "true" && k["reasoning_effort"] == "\"high\"", "the request over the command line");
     }
 
-    const std::string src = read_file("models/templates/deepseek-ai-DeepSeek-V4.1.jinja");
+    // DeepSeek's own template, and the port of it that Unsloth puts in its GGUF files of DeepSeek-V4.1: the one
+    // a server started without --chat-template-file works with
+    for (const char * path : { "models/templates/deepseek-ai-DeepSeek-V4.1.jinja",
+                               "models/templates/unsloth-DeepSeek-V4.1-Flash-1017.jinja" }) {
+    const int n_fail_before = n_fail;
+    const std::string src = read_file(path);
     common_chat_templates_ptr tmpls(common_chat_templates_init(/* model = */ nullptr, src));
 
     // --- the prompt ------------------------------------------------------------------------------------------
@@ -117,8 +132,8 @@ int main() {
 
         const std::pair<const char *, const char *> levels[] = {
             { R"("low")", "50" }, { R"("high")", "75" }, { R"("max")", "100" }, { "33", "33" },
-            // the levels of the other APIs
-            { R"("minimal")", "50" }, { R"("medium")", "75" }, { R"("xhigh")", "100" },
+            // the levels of the other APIs, as DeepSeek's reference conversion takes them
+            { R"("minimal")", "50" }, { R"("medium")", "75" }, { R"("xhigh")", "75" }, { R"("ultra")", "100" },
         };
         for (const auto & [effort, budget] : levels) {
             p = render(tmpls.get(), std::string(R"({"thinking": {"type": "enabled"}, "reasoning_effort": )") + effort + "}");
@@ -131,6 +146,30 @@ int main() {
             p = render(tmpls.get(), std::string(R"({"reasoning_effort": )") + effort + "}");
             check(contains(p.prompt, "Reasoning Effort: 75 "), std::string("effort ") + effort + " is the default");
         }
+    }
+
+    // --- the tools in the prompt -----------------------------------------------------------------------------
+    {
+        common_chat_msg user;
+        user.role    = "user";
+        user.content = "Hello";
+        common_chat_templates_inputs inputs;
+        inputs.messages = { user };
+        inputs.tools    = { common_chat_tool{
+            /* .name        = */ "get_goal",
+            /* .description = */ "Read the goal",
+            /* .parameters  = */ R"({"type":"object","properties":{"detail":{"type":"string"}}})",
+            /* .strict      = */ true,
+        } };
+        auto p = common_chat_templates_apply(tmpls.get(), inputs);
+        // name, description and parameters, written as Python's json.dumps writes them, and nothing else
+        check(contains(p.prompt, R"({"name": "get_goal", "description": "Read the goal", "parameters": {"type": "object", "properties": {"detail": {"type": "string"}}}})" "\n"),
+              "the tool as the model is shown it");
+        check(!contains(p.prompt, "\"strict\""), "strict is not shown to the model");
+        // a request that says to call no tool shows none
+        inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_NONE;
+        p = common_chat_templates_apply(tmpls.get(), inputs);
+        check(!contains(p.prompt, "## Tools") && !contains(p.prompt, "get_goal") && p.grammar.empty(), "no tools with tool_choice none");
     }
 
     // --- the answer ------------------------------------------------------------------------------------------
@@ -164,6 +203,11 @@ int main() {
         const auto without_thinking = render(tmpls.get(), R"({"thinking": {"type": "disabled"}})", /* with_tool = */ true);
         msg = parse(without_thinking, "\n\n" + calls);
         check(msg.content.empty() && msg.reasoning_content.empty() && msg.tool_calls.size() == 1, "a call with the thinking off");
+    }
+
+    if (n_fail != n_fail_before) {
+        fprintf(stderr, "  with %s\n", path);
+    }
     }
 
     if (n_fail == 0) {

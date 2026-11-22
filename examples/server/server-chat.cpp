@@ -286,10 +286,15 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         if (system_param.is_string()) {
             system_content = system_param.get<std::string>();
         } else if (system_param.is_array()) {
+            // the blocks are joined with a blank line, as DeepSeek's reference conversion joins them
+            // (deepseek-recipe); they used to be glued to one another
             for (const auto & block : system_param) {
                 if (json_value(block, "type", std::string()) == "text") {
                     std::string content_block = json_value(block, "text", std::string());
                     if (!string_starts_with(content_block, "x-anthropic-")) {
+                        if (!system_content.empty()) {
+                            system_content += "\n\n";
+                        }
                         system_content += content_block;
                     }
                 }
@@ -386,9 +391,15 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     if (result_content.is_string()) {
                         result_text = result_content.get<std::string>();
                     } else if (result_content.is_array()) {
+                        // several blocks: joined with a blank line, as the system blocks above
+                        bool first_block = true;
                         for (const auto & c : result_content) {
                             if (json_value(c, "type", std::string()) == "text") {
+                                if (!first_block) {
+                                    result_text += "\n\n";
+                                }
                                 result_text += json_value(c, "text", std::string());
+                                first_block = false;
                             }
                         }
                     }
@@ -494,7 +505,7 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
             int budget_tokens = json_value(thinking, "budget_tokens", 10000);
             oai_body["thinking_budget_tokens"] = budget_tokens;
         }
-        if (thinking_type == "enabled" || thinking_type == "disabled") {
+        if (thinking_type == "enabled" || thinking_type == "adaptive" || thinking_type == "disabled") {
             oai_body["thinking"] = json {{"type", thinking_type}};
         }
     }

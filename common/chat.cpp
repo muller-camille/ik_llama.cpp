@@ -267,21 +267,32 @@ void common_chat_reasoning_kwargs_parse_oaicompat(const json & body, std::map<st
     if (!body.is_object()) {
         return;
     }
+    // As DeepSeek's reference conversion resolves them (deepseek-recipe, protocol/reasoning.rs): "thinking"
+    // decides whether the model reasons, "adaptive" being "enabled"; without it an effort of "none" turns the
+    // reasoning off and any other effort turns it on.
+    bool decided = false;
     const auto thinking = body.find("thinking");
     if (thinking != body.end() && thinking->is_object()) {
         const std::string type = thinking->value("type", std::string());
-        if (type == "enabled") {
+        if (type == "enabled" || type == "adaptive") {
             chat_template_kwargs["enable_thinking"] = "true";
+            decided = true;
         } else if (type == "disabled") {
             chat_template_kwargs["enable_thinking"] = "false";
+            decided = true;
         }
     }
     const auto effort = body.find("reasoning_effort");
     if (effort != body.end()) {
         if (effort->is_string() && (*effort == "none" || *effort == "off")) {
-            chat_template_kwargs["enable_thinking"] = "false";
+            if (!decided) {
+                chat_template_kwargs["enable_thinking"] = "false";
+            }
         } else if (effort->is_string() || effort->is_number_integer()) {
             chat_template_kwargs["reasoning_effort"] = effort->dump();
+            if (!decided) {
+                chat_template_kwargs["enable_thinking"] = "true";
+            }
         }
     }
 }
@@ -1839,6 +1850,24 @@ static common_chat_params common_chat_params_init_gigachat_v3(
 // The DeepSeek V4 reference implementation renders consecutive tool results into a single
 // user block, ordered by the tool call order of the preceding assistant message (matched
 // by tool call id) rather than by the order they appear in the conversation.
+// A template of DeepSeek V3.2, V4 or V4.1: it writes tool calls with the DSML token. DeepSeek's own templates
+// hold the token in a variable `dsml_token`; the port that Unsloth puts in its GGUF files of V4.1 holds it in a
+// variable `DSML`, and went unrecognized: its tool calls were then left to the generic analysis of templates,
+// whose grammar wrote `string="true"` for every parameter and held objects to the order of their schema.
+// V3.2 names the block of calls "function_calls", V4 "tool_calls", V4.1 " calls" (with a space, as before
+// "invoke" and "parameter").
+static bool deepseek_is_dsml_template(const std::string & src) {
+    return src.find("｜DSML｜") != std::string::npos &&
+           (src.find("function_calls") != std::string::npos ||
+            src.find("tool_calls") != std::string::npos ||
+            src.find(" calls>") != std::string::npos ||
+            src.find(" invoke name") != std::string::npos);
+}
+
+static bool deepseek_is_v41_template(const std::string & src) {
+    return src.find("function_calls") == std::string::npos && src.find(" invoke name") != std::string::npos;
+}
+
 static json deepseek_v4_sort_tool_results(const json & messages) {
     json adjusted = messages;
     std::map<std::string, size_t> call_order;
@@ -1912,14 +1941,35 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
     common_chat_params data;
 
     const bool is_v4 = tmpl.source().find("function_calls") == std::string::npos;
-    const bool is_v41 = is_v4 && tmpl.source().find("' invoke") != std::string::npos;
+    const bool is_v41 = deepseek_is_v41_template(tmpl.source());
 
     std::optional<json> adjusted_messages;
     if (is_v4) {
         adjusted_messages = deepseek_v4_sort_tool_results(inputs.messages);
     }
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, adjusted_messages);
+    // The tools as the model is shown them by DeepSeek's reference rendering (deepseek-recipe): name, description
+    // and parameters, nothing else of what a request may say about a tool ("strict"), and no tools at all when
+    // the request says to call none.
+    json prompt_tools = json::array();
+    if (inputs.tools.is_array() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
+        for (const auto & tool : inputs.tools) {
+            if (!tool.is_object() || !tool.contains("function") || !tool.at("function").is_object()) {
+                prompt_tools.push_back(tool);
+                continue;
+            }
+            const auto & function = tool.at("function");
+            json shown = json::object();
+            for (const char * key : { "name", "description", "parameters" }) {
+                if (function.contains(key)) {
+                    shown[key] = function.at(key);
+                }
+            }
+            prompt_tools.push_back({ { "type", "function" }, { "function", shown } });
+        }
+    }
+
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, adjusted_messages, prompt_tools);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
     data.thinking_start_tag = "<think>";
@@ -2982,16 +3032,8 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         return common_chat_params_init_minimax_m3(tmpl, params);
     }
 
-    // DeepSeek V3.2/V4/V4.1 format detection: template defines dsml_token and uses it for tool calls.
-    // The template source contains the token as a variable assignment, not as a literal in markup.
-    // V3.2 names the tool call block "function_calls", V4 names it "tool_calls", V4.1 names it
-    // " calls" (leading space; the invoke/parameter tags are spaced too).
-    if (src.find("dsml_token") != std::string::npos &&
-        src.find("DSML") != std::string::npos &&
-        (src.find("function_calls") != std::string::npos ||
-         src.find("tool_calls") != std::string::npos ||
-         src.find("' calls>") != std::string::npos ||
-         src.find("' invoke") != std::string::npos)) {
+    // DeepSeek V3.2/V4/V4.1 format detection: the template writes tool calls with the DSML token.
+    if (deepseek_is_dsml_template(src)) {
         LOG_DBG("Using specialized template: DeepSeek V3.2/V4/V4.1\n");
         return common_chat_params_init_deepseek_v3_2(tmpl, params);
     }
@@ -3026,9 +3068,10 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
 }
 
 // DeepSeek-V4.1 takes low, high, max or a number from 1 to 100 as `reasoning_effort` and refuses anything else.
-// The levels the other APIs name are brought to its own the way DeepSeek's API takes them: medium as high, xhigh
-// as max (and minimal as low). A value that is none of these is left out, so that the request of a client that
-// sends one is answered with the default amount of reasoning instead of an error.
+// The levels the other APIs name are brought to its own as DeepSeek's reference conversion brings them
+// (deepseek-recipe): minimal as low, medium and xhigh as high, ultra as max. A value that is none of these is
+// left out, so that the request of a client that sends one is answered with the default amount of reasoning
+// instead of an error.
 static void deepseek_reasoning_effort(json & extra_context) {
     const auto it = extra_context.find("reasoning_effort");
     if (it == extra_context.end() || it->is_null()) {
@@ -3043,9 +3086,9 @@ static void deepseek_reasoning_effort(json & extra_context) {
         const std::string effort = it->get<std::string>();
         if (effort == "minimal") {
             *it = "low";
-        } else if (effort == "medium") {
+        } else if (effort == "medium" || effort == "xhigh") {
             *it = "high";
-        } else if (effort == "xhigh") {
+        } else if (effort == "ultra") {
             *it = "max";
         }
         if (*it == "low" || *it == "high" || *it == "max") {
@@ -3094,6 +3137,33 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         workaround::map_developer_role_to_system(params.messages);
     }
 
+    if (deepseek_is_dsml_template(src) && params.messages.is_array() && params.messages.size() == inputs.messages.size()) {
+        // The text blocks of a message are joined with a blank line, as DeepSeek's reference conversion joins
+        // them (deepseek-recipe). A template that takes no list of blocks got them joined with a single line
+        // break, which is not the prompt the model is served with elsewhere.
+        for (size_t i = 0; i < inputs.messages.size(); i++) {
+            const auto & parts = inputs.messages[i].content_parts;
+            if (parts.empty()) {
+                continue;
+            }
+            bool        all_text = true;
+            std::string joined;
+            for (const auto & part : parts) {
+                if (part.type != "text") {
+                    all_text = false;
+                    break;
+                }
+                if (&part != &parts.front()) {
+                    joined += "\n\n";
+                }
+                joined += part.text;
+            }
+            if (all_text) {
+                params.messages[i]["content"] = joined;
+            }
+        }
+    }
+
     if (!tmpl.original_caps().supports_system_role) {
         workaround::system_message_not_supported(params.messages);
     }
@@ -3115,7 +3185,7 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
     for (auto el : inputs.chat_template_kwargs) {
         params.extra_context[el.first] = json::parse(el.second);
     }
-    if (src.find("dsml_token") != std::string::npos) {
+    if (deepseek_is_dsml_template(src)) {
         deepseek_reasoning_effort(params.extra_context);
     }
 
