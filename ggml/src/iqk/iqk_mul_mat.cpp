@@ -27,6 +27,7 @@
 #include "iqk_mul_mat.h"
 #include "iqk_quantize.h"
 #include "iqk_flash_impl.h"
+#include "iqk_indexer_512.h"
 #include "iqk_gemm_floats.h"
 #include "iqk_gemm_kquants.h"
 #include "iqk_gemm_ktquants.h"
@@ -2418,7 +2419,9 @@ void iqk_bucket_topk(int nval, int ntop, float * values, int * idx, int * idx_in
         for (int k = 0; k < 8; ++k) ++counts[aux[k]];
     }
     for (int j = 8*(ngood/8); j < ngood; ++j) {
-        int i = int(av*values[j] + bv);
+        // rounded as _mm256_cvtps_epi32 rounds above, not cut: a value must never get a better bucket than a
+        // higher one, or it is taken in its place
+        int i = _mm_cvtss_si32(_mm_fmadd_ss(_mm_set_ss(av), _mm_set_ss(values[j]), _mm_set_ss(bv)));
         i = std::max(0, std::min(i, nbucket-1));
         idx_aux[j] = i;
         ++counts[i];
@@ -2514,6 +2517,9 @@ template <int nrc_y> inline void iqk_mul_f32_f32_r(int n_per_row, int n_rows, si
 }
 
 size_t iqk_idx_topk_work_buffer_size(const struct ggml_tensor * dst, int nthread) {
+    if (iqk_indexer512_usable(dst)) {
+        return iqk_indexer512_work_size(dst, nthread);
+    }
     auto k = dst->src[0];
     auto q = dst->src[1];
     if (q->ne[2] >= nthread) {
@@ -2594,6 +2600,12 @@ bool iqk_indexer_topk(struct ggml_tensor * dst, void * work_buffer, barrier_t ba
     if (q->ne[2] != w->ne[1]) return false;
     if (q->type != GGML_TYPE_F32) return false;
     if (m->type != GGML_TYPE_F32 && m->type != GGML_TYPE_F16 && m->type != GGML_TYPE_I32) return false;
+
+    if (iqk_indexer512_usable(dst)) {
+        // f16 keys with AVX-512: see iqk_indexer_512.cpp
+        iqk_indexer512(dst, work_buffer, barrier, barrier_data, ith, nth);
+        return true;
+    }
 
     auto work_size = iqk_idx_topk_work_wbs_per_thread(dst, nth);
     auto work_all = (char *)work_buffer;

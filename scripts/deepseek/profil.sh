@@ -17,6 +17,9 @@
 #                chronométrage dit ce que chacune a coûté (les tokens/s de ces passes ne se comparent donc
 #                pas aux autres)
 #              (autre exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0" coupe ces optimisations tour à tour ;
+#              VARS="GGML_INDEXER_512=0" compare l'indexeur AVX-512 à l'ancien, à mesurer avec CONTEXTE=20000 ;
+#              VARS="UBATCH=2048" lit le prompt par lots de 2048 tokens au lieu de 512 : ce n'est pas une
+#              variable du serveur mais son option -ub, la ligne « texte lu » dit ce que cela change ;
 #              VARS= ne fait que les quatre passes de base)
 #   CONTEXTE   taille du texte long en tokens, 4000 par défaut ; CONTEXTE=0 saute ces passes
 # Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe
@@ -117,6 +120,10 @@ passe() {
                 --api-key "$API_KEY" --host 127.0.0.1 --port "$PORT")
     [ -z "$MIRROR" ] || args+=(--numa-mirror "$MIRROR")
     [ -z "$draft" ]  || args+=(-md "$draft" --spec-type "$SPEC")
+    # UBATCH=<n> parmi les réglages : la taille des lots du prompt, une option du serveur
+    case $var in
+        UBATCH=*) v=${var#UBATCH=}; args+=(-b "$((v > 2048 ? v : 2048))" -ub "$v") ;;
+    esac
 
     dire ""
     if [ "$contexte" -gt 0 ]; then
