@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 452" width="920" height="452" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Generation speed, release by release</title>
+<desc id="d">Line chart. Without a draft: 9.7 tokens per second before --numa-mirror, 18.4 with b5294, 22.9 with b5357. With the DSpark draft: 25.6 with b5294, 31.5 with b5345. The table under the chart has every figure.</desc>
+<rect x="0.5" y="0.5" width="919" height="451" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<text x="24" y="32" font-size="16" font-weight="600" fill="#0b0b0b">Generation speed, release by release</text>
+<text x="24" y="52" font-size="12" fill="#52514e">Tokens per second, DeepSeek-V4.1-Flash UD-Q4_K_XL on 2 x 16 cores, 200 tokens after a short prompt</text>
+<line x1="24" y1="74" x2="46" y2="74" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+<circle cx="35" cy="74" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<text x="54" y="78" font-size="12" fill="#52514e">Without a draft</text>
+<line x1="185" y1="74" x2="207" y2="74" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<circle cx="196" cy="74" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<text x="215" y="78" font-size="12" fill="#52514e">With the DSpark draft (n_max=4)</text>
+<line x1="46" y1="304.0" x2="772" y2="304.0" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="46" y1="224.0" x2="772" y2="224.0" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="46" y1="144.0" x2="772" y2="144.0" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="46" y1="384.0" x2="772" y2="384.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="38" y="388.0" font-size="11" text-anchor="end" fill="#898781" style="font-variant-numeric: tabular-nums">0</text>
+<text x="38" y="308.0" font-size="11" text-anchor="end" fill="#898781" style="font-variant-numeric: tabular-nums">10</text>
+<text x="38" y="228.0" font-size="11" text-anchor="end" fill="#898781" style="font-variant-numeric: tabular-nums">20</text>
+<text x="38" y="148.0" font-size="11" text-anchor="end" fill="#898781" style="font-variant-numeric: tabular-nums">30</text>
+<text x="60.0" y="402.0" font-size="11" text-anchor="middle" fill="#898781">before</text>
+<text x="129.8" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5294</text>
+<text x="199.6" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5297</text>
+<text x="269.4" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5301</text>
+<text x="339.2" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5308</text>
+<text x="409.0" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5317</text>
+<text x="478.8" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5340</text>
+<text x="548.6" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5342</text>
+<text x="618.4" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5345</text>
+<text x="688.2" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5353</text>
+<text x="758.0" y="402.0" font-size="11" text-anchor="middle" fill="#898781">b5357</text>
+<line x1="60.0" y1="314.4" x2="60.0" y2="371.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="67.0" y="368.0" font-size="11.5" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">9.7</tspan><tspan dx="7">weights interleaved between the two sockets (9.4 on one socket)</tspan></text>
+<line x1="129.8" y1="244.8" x2="129.8" y2="347.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="136.8" y="344.0" font-size="11.5" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">18.4</tspan><tspan dx="7">--numa-mirror: one copy of the weights per socket</tspan></text>
+<line x1="339.2" y1="221.6" x2="339.2" y2="323.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="346.2" y="320.0" font-size="11.5" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">21.3</tspan><tspan dx="7">weight prefetch, small nodes on one thread, 32 threads instead of 64</tspan></text>
+<line x1="409.0" y1="211.2" x2="409.0" y2="297.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="416.0" y="294.0" font-size="11.5" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">22.6</tspan><tspan dx="7">hc_proj, even row split, row sharing</tspan></text>
+<line x1="478.8" y1="208.8" x2="478.8" y2="273.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="485.8" y="270.0" font-size="11.5" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">22.9</tspan><tspan dx="7">attention on the rows a query sees</tspan></text>
+<polyline fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="60.0,306.4 129.8,236.8 199.6,248.8 269.4,236.8 339.2,213.6 409.0,203.2 478.8,200.8 548.6,199.2 618.4,199.2 688.2,207.2 758.0,200.8"/>
+<circle cx="60.0" cy="306.4" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>before, without a draft: 9.7 tokens/s</title></circle>
+<circle cx="129.8" cy="236.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5294, without a draft: 18.4 tokens/s</title></circle>
+<circle cx="199.6" cy="248.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5297, without a draft: 16.9 tokens/s</title></circle>
+<circle cx="269.4" cy="236.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5301, without a draft: 18.4 tokens/s</title></circle>
+<circle cx="339.2" cy="213.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5308, without a draft: 21.3 tokens/s</title></circle>
+<circle cx="409.0" cy="203.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5317, without a draft: 22.6 tokens/s</title></circle>
+<circle cx="478.8" cy="200.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5340, without a draft: 22.9 tokens/s</title></circle>
+<circle cx="548.6" cy="199.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5342, without a draft: 23.1 tokens/s</title></circle>
+<circle cx="618.4" cy="199.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5345, without a draft: 23.1 tokens/s</title></circle>
+<circle cx="688.2" cy="207.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5353, without a draft: 22.1 tokens/s</title></circle>
+<circle cx="758.0" cy="200.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>b5357, without a draft: 22.9 tokens/s</title></circle>
+<polyline fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="129.8,179.2 199.6,193.6 269.4,176.0 339.2,176.8 409.0,141.6 478.8,135.2 548.6,136.8 618.4,132.0"/>
+<circle cx="129.8" cy="179.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5294, with the dspark draft (n_max=4): 25.6 tokens/s</title></circle>
+<circle cx="199.6" cy="193.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5297, with the dspark draft (n_max=4): 23.8 tokens/s</title></circle>
+<circle cx="269.4" cy="176.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5301, with the dspark draft (n_max=4): 26 tokens/s</title></circle>
+<circle cx="339.2" cy="176.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5308, with the dspark draft (n_max=4): 25.9 tokens/s</title></circle>
+<circle cx="409.0" cy="141.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5317, with the dspark draft (n_max=4): 30.3 tokens/s</title></circle>
+<circle cx="478.8" cy="135.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5340, with the dspark draft (n_max=4): 31.1 tokens/s</title></circle>
+<circle cx="548.6" cy="136.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5342, with the dspark draft (n_max=4): 30.9 tokens/s</title></circle>
+<circle cx="618.4" cy="132.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>b5345, with the dspark draft (n_max=4): 31.5 tokens/s</title></circle>
+<text x="605.4" y="121.0" font-size="12" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">31.5</tspan><tspan dx="7">with the draft</tspan></text>
+<text x="129.8" y="168.2" font-size="12" font-weight="600" text-anchor="middle" fill="#0b0b0b">25.6</text>
+<text x="768.0" y="204.8" font-size="12" fill="#52514e"><tspan font-weight="600" fill="#0b0b0b">22.9</tspan><tspan dx="7">without a draft</tspan></text>
+<text x="24" y="436" font-size="11" fill="#898781">Best thread count measured for each release. Means of 5 runs; one run for b5353 and b5357, single requests for b5294 and before.</text>
+</svg>
