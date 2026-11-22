@@ -11874,6 +11874,15 @@ bool ggml_flash_attn_ext_lazy_kv(struct ggml_tensor * a) {
     }
     // op_params[1] of a concatenation: left to the attention node that reads it
     ggml_set_op_params_i32(cat, 1, 1);
+    // The node reads the two parts where they are, so they have to stay what they are until it has run. The
+    // allocator of a graph gives the memory of a tensor to another one once its last reader is passed, and the
+    // only reader of the parts it knew of was the concatenation: by the time of the attention node their memory
+    // was free, and the result of that very node could be put on the rows it was reading. With several row groups
+    // nothing is written before everything is read. With one, a thread writes the result of a query row while
+    // other rows are still to be read: wrong results, NaN among them. As sources of the node, the parts are kept.
+    GGML_ASSERT(a->src[6] == NULL && a->src[7] == NULL);
+    a->src[6] = cat->src[0];
+    a->src[7] = cat->src[1];
     return true;
 }
 
@@ -17043,11 +17052,27 @@ static void ggml_compute_forward_concat_now(
     const struct ggml_compute_params * params,
     struct ggml_tensor * dst);
 
+// GGML_POISON=1 fills with NaN what a node may not read before it is written: the work buffer at the start of a
+// graph, and the place of a concatenation that is left undone. A read of such memory then shows as NaN in the
+// result, every time, instead of depending on what was computed there before. For debugging: it costs a pass
+// over that memory.
+static bool ggml_poison_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_POISON");
+        enabled = env != NULL && strcmp(env, "0") != 0;
+    }
+    return enabled;
+}
+
 static void ggml_compute_forward_concat(
     const struct ggml_compute_params * params,
     struct ggml_tensor * dst) {
     if (ggml_get_op_params_i32(dst, 1) == 1) {
         // left to the attention node that reads it (ggml_flash_attn_ext_lazy_kv)
+        if (params->ith == 0 && ggml_poison_enabled()) {
+            memset(dst->data, 0xff, ggml_nbytes(dst));
+        }
         return;
     }
     ggml_compute_forward_concat_now(params, dst);
@@ -31804,6 +31829,9 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
     GGML_ASSERT(cplan);
     GGML_ASSERT(cplan->n_threads > 0);
     GGML_ASSERT(cplan->work_size == 0 || cplan->work_data != NULL);
+    if (cplan->work_size > 0 && ggml_poison_enabled()) {
+        memset(cplan->work_data, 0xff, cplan->work_size);
+    }
 
     int n_threads = cplan->n_threads;
 
