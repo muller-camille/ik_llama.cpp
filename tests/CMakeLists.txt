@@ -144,6 +144,9 @@ set_tests_properties(test-flash-attn-threads-4-row-groups PROPERTIES ENVIRONMENT
 # and with a number of groups drawn for every node, as when they are compared in a profile
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-drawn-row-groups)
 set_tests_properties(test-flash-attn-threads-drawn-row-groups PROPERTIES ENVIRONMENT "GGML_FA_ROW_GROUPS=-1")
+# and with a cache in two parts put together before the attention, as it used to be
+llama_test(test-flash-attn-threads NAME test-flash-attn-threads-concatenated)
+set_tests_properties(test-flash-attn-threads-concatenated PROPERTIES ENVIRONMENT "GGML_LAZY_CONCAT=0")
 
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)

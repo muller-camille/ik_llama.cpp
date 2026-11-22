@@ -17,8 +17,9 @@ This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik
 | `hc_proj` | The norm, the projection and the collapse of the DeepSeek-V4 hyper-connections in one node, each thread on the part of the streams it has just written. | `GGML_HC_PROJ=0` |
 | Even row split | The rows of `Q8_0_R8` matrices go to the threads in groups of 8, no thread more than one group above another; the expert rows are taken in smaller chunks. | |
 | Row sharing | A thread that is done with its rows of a large matrix product computes rows the others have not started on. The values do not depend on who computes them. | `GGML_SHARE_ROWS=0` |
-| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache. The threads form a grid, groups of rows by groups of heads, sized so that a thread neither fetches all the rows nor combines many partial results; an index list that only repeats the mask is not gathered first. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_ROW_GROUPS=<n>` (1 = no groups of rows, -1 = drawn for every node: the profile then compares them) |
-| Draft tokens after a long context | Once the context has more compressed rows than the indexer picks, the attention of DeepSeek-V4 gets the cache rows of each token of a draft as a list, not the same rows for every token. The same grid of threads takes them: a thread copies, for one token after the other, the rows of its list that fall to its group of rows, asks for the next ones in advance, and computes that token on them. Before, every thread copied all the rows of a token. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_PREFETCH=<rows>` (0 = none in advance) |
+| Attention on the rows in view | With one K/V head and fewer than 8 query tokens (DeepSeek-V4 decoding, with or without a draft), the attention is computed on the 32-row blocks of the cache that a query sees, not on the whole padded cache. The threads form a grid, groups of rows by groups of heads, sized so that a thread neither fetches all the rows nor combines many partial results; an index list that only repeats the mask is not gathered first. | `GGML_FA_SKIP_MASKED=0`, `GGML_FA_ROW_GROUPS=<n>` (1 = no groups of rows, -1 = drawn for every node: the profile then compares them), `GGML_FA_PARTS_AHEAD=0` |
+| Draft tokens after a long context | Once the context has more compressed rows than the indexer picks, the attention of DeepSeek-V4 gets the cache rows of each token of a draft as a list, not the same rows for every token. The same grid of threads takes them: a thread copies, for one token after the other, the rows of its list that fall to its group of rows, and computes that token on them. Before, every thread copied all the rows of a token. | `GGML_FA_SKIP_MASKED=0` |
+| The cache of DeepSeek-V4 read in its two parts | For every attention node the last raw rows and the compressed rows were copied next to each other first. In the graphs of a draft after a long context that is all the compressed rows of the context, for 35 layers, at every step: 1.3 ms of a step with 3165 tokens of context, and it grows with the context. On the CPU the copy is now left undone and the attention reads the rows in the two caches; where it cannot (8 query tokens or more, another kernel), it makes the copy itself first. Rows gathered that way come from the memory, so the next ones of the list are asked for in advance. | `GGML_LAZY_CONCAT=0`, `GGML_FA_ROWS_AHEAD=0` |
 | Attention sinks for a token decoded alone | With one query token and one K/V head, two of the three ways the threads share the attention left the sinks out of the softmax: a token decoded alone did not get the result of the same token in a batch. They are applied everywhere now. | |
 | Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. For the attention above: how many nodes went which way, with how many groups of rows, and how long they took. | `GGML_PROFILE=1` |
 | Tool arguments (DeepSeek tool calls) | The grammar that holds a tool call to the schema of the tool took `{}`, the schema that accepts anything, for "a JSON object" wherever it stood: in an array declared `"items": {}` the model could only write objects. Metabase declares the table and every clause of its query builder that way, so a model could not write a query for it and called the tool again and again. `{}` inside a schema is now any value. The arguments of a tool that does not say `"strict": true` are also held as JSON Schema means them, not as an output format: properties in any order, and others than those the schema names (Metabase's `limit`); types, `const`, `enum` and array lengths still apply. A JSON answer asked for with `response_format` is as strict as before. | `LLAMA_TOOL_ARGS_STRICT=1` |
@@ -33,16 +34,16 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5347/ik_llama-rhel8-b5347-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5347-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5347/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5350/ik_llama-rhel8-b5350-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5350-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5350/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
 
 | Script | What it does |
 |---|---|
-| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server |
+| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server; with the draft model, its repacked file (`llama-quantize --repack <drafter> <drafter>-R8.gguf Q8_0_R8`) when that is in the folder of the model files: a draft call took 9.5 ms instead of 11.5 with it |
 | `charger-deepseek.sh` | the loading alone, as root |
 | `mesure.sh` | starts a server of its own and measures the speed, with or without a draft |
 | `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting |
@@ -117,6 +118,24 @@ With a context of a few thousand tokens the attention is the largest cost that i
 | 3165 tokens | DSpark, `n_max=4` | 24.5 | 8.9 ms for 3.0 tokens | |
 
 In the last line a draft step takes 67.2 ms, and 58% of the draft tokens were accepted on this text.
+
+`rhel8-b5345` (the lists of a draft on the grid of threads), 32 threads:
+
+| Prompt | Draft | Tokens/s | Attention per graph |
+|---|---|---|---|
+| short | | 23.1 | 1.5 ms |
+| 3165 tokens | | 21.9 | 2.9 to 3.0 ms |
+| short | DSpark, `n_max=4` | 31.5 | 3.0 ms for 3.4 tokens |
+| 3165 tokens | DSpark, `n_max=4` | 27.7 | 7.2 ms for 3.0 tokens |
+
+In the last line a draft step takes 64.4 ms instead of 67.2, and 68% of the draft tokens were accepted on this text (58% in the run of `rhel8-b5342`, hence most of the difference in tokens/s). The same release with the number of row groups drawn for every node (`GGML_FA_ROW_GROUPS=-1`), time of thread 0 in an attention node, in microseconds:
+
+| Row groups | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| one token, 672 rows read in place | 99 | 73.6 | 59.5 | 65.1 |
+| about 3 tokens of a draft, 640 rows of each gathered | 258 | 210.6 | 171.7 | 186.5 |
+
+With one row group a thread does not wait for the others, so its time understates the node. Asking for the rows in advance before copying them made no difference (171.4 against 172.0 with 4 row groups) and was removed. The choice of the number of row groups goes by these figures since `rhel8-b5349`.
 
 With `rhel8-b5317` and 32 threads, one optimization turned off at a time:
 

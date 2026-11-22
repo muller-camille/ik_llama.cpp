@@ -67,6 +67,15 @@ IQK_API void iqk_fa_report(void);
 
 typedef void (*barrier_t) (void *);
 
+// K, and V which is the same, in two parts that were not put together: the rows 0 .. n0-1 at k0, the others at k1.
+struct iqk_fa_two_parts {
+    const void * k0;
+    long         stride0;
+    int          n0;
+    const void * k1;
+    long         stride1;
+};
+
 IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float max_bias,
                             int neq3, int neq2, long nbq3, long nbq2,
                             int nek3, int nek2, long nbk3, long nbk2,
@@ -91,7 +100,10 @@ IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float max_bias,
                             float         softcap,  // if > 0, a "soft-cap" operation is applied before softmax
                             float       * qkv,      // v*softmax(scale*(k*q))
                             void * work_buffer, barrier_t barrier, void * barrier_data,
-                            int ith, int nth, int n_swa, struct ggml_tensor * indexer);
+                            int ith, int nth, int n_swa, struct ggml_tensor * indexer,
+                            // not NULL: k and v do not hold the rows, they are in these two parts. Returns false
+                            // when the rows cannot be read there; the caller then puts them together at k
+                            const struct iqk_fa_two_parts * two_parts);
 
 IQK_API void iqk_topk_moe(int n_experts, int n_experts_used, int nrows, const float * logits,
         float * weights, int32_t * ids, int ith, int nth);

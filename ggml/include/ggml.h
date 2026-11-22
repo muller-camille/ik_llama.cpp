@@ -2622,6 +2622,14 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
+    // K and V of the attention node `a` are views of one concatenation of rows (dim 2 of a [D, 1, rows, 1]
+    // tensor, as a cache made of two parts is put together). Leaves that concatenation undone: on the CPU the
+    // attention reads the rows of the two parts where they are, when it can, and otherwise makes the
+    // concatenation itself before it goes on, so the result is the same either way. To be called only when
+    // nothing but this attention node reads the concatenation, and only when the graph is computed by the CPU
+    // backend alone. Returns whether the node is of that form (and GGML_LAZY_CONCAT is not 0).
+    GGML_API bool ggml_flash_attn_ext_lazy_kv(struct ggml_tensor * a);
+
     // Latent attention over a packed K/V cache with an independently-visible K/V prefix.
     // The value vector of cache row n is cache[dv_off .. dv_off+dv, n] (MLA "absorbed"
     // layout: openPangu packs [ckv|k_pe] -> dv_off=0; DeepSeek/GLM_DSA packs [k_pe|ckv]
