@@ -293,7 +293,7 @@ jobs:
           - \`deepseek.sh\`: loads the model into RAM, one copy of the weights per socket, and starts the server
           - \`charger-deepseek.sh\`: the loading alone, as root
           - \`mesure.sh\`: starts a server of its own and measures the speed, with or without a draft
-          - \`profil.sh\`: the same with \`GGML_PROFILE=1\`, in one run without and with the drafter, with one thread per core and one per logical CPU, after a short and after a long prompt, then with one setting changed at a time; it ends with a table of the passes
+          - \`profil.sh\`: the same with \`GGML_PROFILE=1\`, in one run without and with the drafter, with one thread per core and one per logical CPU, after a short and after a long prompt, then with one setting changed at a time, several tries per pass; it ends with a table of the passes. About 2 hours on 2 x 16 cores, 20 minutes with \`RAPIDE=1\`
           - \`drafter.sh\`: tries several settings of the DSpark draft
           - \`recompresser.sh\`: requantizes the non-expert \`Q8_0\` tensors and installs the result next to the model
           - \`harness.sh\`: starts [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (\`dsh\`, to be installed apart: Node.js 24.9 or newer, \`npm install -g @deepseek-ai/dsh\`) with the server in the place of DeepSeek's API
