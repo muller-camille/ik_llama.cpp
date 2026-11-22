@@ -4,7 +4,7 @@
 
 ## This fork
 
-This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) and adds what it took to run **DeepSeek-V4.1 on CPUs only, on a server with several sockets**, from the GGUF files that upstream llama.cpp produces (for example [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)). Everything after this section is the README of ik_llama.cpp, unchanged.
+This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) and adds what it took to run **DeepSeek-V4.1 on CPUs only, on a server with several sockets**, from the GGUF files that upstream llama.cpp produces (for example [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)). Everything after this section is the README of ik_llama.cpp, unchanged. What each release changed and what was measured with it: [Release by release](#release-by-release).
 
 ### What it adds
 
@@ -72,6 +72,53 @@ The script reads `API_KEY`, `HOST`, `PORT` and `CTX` from `~/.deepseek.conf` lik
 - The server has one slot: the agents the harness can run side by side take turns on it.
 
 Checked here with version 0.2.2-rc.5 of the harness and a small model in place of DeepSeek-V4.1: the web UI and the headless mode, a tool call and its result through the server and back, with and without internet access. The release workflow can repeat the headless run on a RHEL 8.10 image (`test_harness`); it did for `rhel8-b5352`, with Node.js 24.22.3 from nodejs.org.
+
+### Release by release
+
+Every release of this fork, what it changed, and what was measured with it on the server of the next section (2 x 16 cores, 200 tokens generated). The figures are tokens per second. "Long prompt" is the generation after a prompt of 3159 to 3165 tokens up to `rhel8-b5345` and of 19714 tokens from `rhel8-b5353` on; "prompt read" is the speed at which that prompt was read. An empty cell was not measured: a release that only fixes something, or that the next one replaced the same day.
+
+| Release | What it changed | Threads | Short prompt | With the draft | Long prompt | Long prompt, draft | Prompt read |
+|---|---|---|---|---|---|---|---|
+| `rhel8-b5284`, 19 Nov | First release: CPU binaries for RHEL 8 (glibc 2.28). The DeepSeek-V4.1 GGUFs of upstream llama.cpp load as they are, MXFP8 engram table included. | | | | | | |
+| `rhel8-b5288` | The DSpark draft of upstream llama.cpp loads (`-md ... --spec-type dspark`). | | | | | | |
+| `rhel8-b5290` | The data of MXFP8 tensors is checked when a model loads. | | | | | | |
+| | Before `--numa-mirror`: all the weights on one NUMA node, then interleaved between the two | 32 | 9.4, 9.7 | | | | |
+| `rhel8-b5293`, 20 Nov | `--numa-mirror`: one copy of the weights per NUMA node, each thread reads from its own socket. Measured with the next release. | | | | | | |
+| `rhel8-b5294` | Fix: flash attention gives the same result with any number of threads. | 32 | 17.1 | | | | |
+| | | 64 | 18.4 | 25.6 | | | |
+| | | 16 | 12.2 | | | | |
+| `rhel8-b5296` | Small nodes computed by one thread, first attempt. | | | | | | |
+| `rhel8-b5297` | Fix: the Markov table of the DSpark draft is not repacked. Slower by 8%: the first attempt at serial nodes, taken back in the next release. | 64 | 16.9 | 23.8 | | | |
+| `rhel8-b5301` | `GGML_PROFILE=1`, the profile of the graphs. | 64 | 18.4 | 26.0 | | | |
+| | | 32 | 18.0 | | | | |
+| | | 16 | 12.4 | | | | |
+| `rhel8-b5305` | Serial small nodes, second attempt: thread 0 computes them alone and the others do not meet for them. `rms_norm`, `hc_post`, `rope` and `argmax` take less time. Measured with the next release. | | | | | | |
+| `rhel8-b5308` | Weight prefetch for `Q8_0_R8` and `MXFP4_R8`. From here on 32 threads are faster than 64. | 64 | 20.0 | 25.9 | | | |
+| | | 32 | 21.3 | | | | |
+| | The same with `IQK_PREFETCH=0`, then with `GGML_SERIAL_NODES=0` | 64 | 19.4, 19.3 | 25.1 (no prefetch) | | | |
+| `rhel8-b5313` | Weight prefetch for `Q4_K_R4`, `Q5_K_R4`, `Q6_K_R4`. `llama-quantize ... COPY --custom-q` requantizes only the tensors a rule names. | | | | | | |
+| `rhel8-b5315` | `hc_proj`: the norm, the projection and the collapse of the hyper-connections in one node. The rows of `Q8_0_R8` split evenly between the threads. Measured with the next release. | | | | | | |
+| `rhel8-b5317` | Row sharing: a thread that is done takes rows the others have not started. | 32 | 22.6 | 30.3 | | | |
+| | | 64 | 20.8 | | | | |
+| | The same with `GGML_SHARE_ROWS=0`, then with `GGML_HC_PROJ=0` | 32 | 22.2, 20.5 | 30.1, 27.3 | | | |
+| `rhel8-b5334`, 21 Nov | Brought up to date with ik_llama.cpp. The mean of the streams is computed only for the layers the draft reads. | | | | | | |
+| `rhel8-b5335` | The DeepSeek scripts are in the release: `deepseek.sh`, `charger-deepseek.sh`, `drafter.sh`, `mesure.sh`, `profil.sh`, `recompresser.sh`. | | | | | | |
+| `rhel8-b5338` | Attention with one K/V head: fix of the sinks for a token decoded alone, attention on the rows a query sees instead of the whole padded cache, all the threads for a draft. Measured with the next release. | | | | | | |
+| `rhel8-b5340` | `--webui llamacpp`, the current web UI of llama.cpp. | 32 | 22.9 | 31.1 | 21.4 | 26.1 | 236 |
+| `rhel8-b5342` | The threads of the attention in a grid, groups of rows by groups of heads. | 32 | 23.1 | 30.9 | 21.7 | 24.5 | |
+| `rhel8-b5345` | The index lists of a draft on the same grid, each token on its own rows. | 32 | 23.1 | 31.5 | 21.9 | 27.7 | 234 |
+| `rhel8-b5347` | Tool calls: `{}` in a schema is any value, and a tool that is not `strict` gets open objects. Metabase could not get a query written before. | | | | | | |
+| `rhel8-b5349` | The number of row groups of the attention grid is chosen from what `rhel8-b5345` measured. | | | | | | |
+| `rhel8-b5350` | The attention reads the cache of DeepSeek-V4 in its two parts, without copying them together first: 1.3 ms of a draft step at 3165 tokens of context, more with a longer one. It had a fault, see `rhel8-b5357`. | | | | | | |
+| `rhel8-b5352`, 22 Nov | `harness.sh`, DeepSeek Harness on the server. The fields of DeepSeek's API (`thinking`, `reasoning_effort`). | | | | | | |
+| `rhel8-b5353` | Unsloth's chat template is recognized as DeepSeek's, so the tool-call handling of `rhel8-b5347` reaches a server started from Unsloth's files. Prompts as DeepSeek's reference builds them. One run. A request that ends in a tool call, with the draft: 33.9. | 32 | 22.1 | | 21.2 | | 230 |
+| `rhel8-b5357` | Fix: in `rhel8-b5350` to `rhel8-b5353` the result of an attention node could be written over cache rows it still had to read, when several tokens were decoded together with one row group: wrong values, and an abort after the 19714-token prompt with `GGML_FA_ROW_GROUPS=1` or `-1`. `GGML_POISON=1`. One run. | 32 | 22.9 | | 21.2 | | 230 |
+| `rhel8-b5360` | The indexer of DeepSeek-V4 with AVX-512: 5% to 10% of a prompt batch and 3% of a generated token went there at 20000 tokens of context. On 4 cores, a batch of 512 tokens over 5120 rows takes 28 ms instead of 160. Fix of the rounding of the buckets in the former way. Not measured on the server yet. | | | | | | |
+| `rhel8-b5361` | `UBATCH=<n>` in `deepseek.sh` and `profil.sh`: the size of the prompt batches. The expert weights are read from the memory once per batch, a third of the time of a 512-token batch. On a stand-in of the model with 4 cores, a 1338-token prompt is read at 4.45 tokens/s in one batch against 2.45 in batches of 512. Not measured on the server yet. | | | | | | |
+
+From `rhel8-b5297` on the figures are means of 5 runs, except where one run is said; before, they are single requests. The runs of one build differ by up to 3%. Those with the draft (DSpark, `n_max=4`) also move with the share of draft tokens the model accepts, which depends on the text: 58% to 74% in these runs. `rhel8-b5340` to `rhel8-b5345` generate another text than `rhel8-b5317` because of the fix of the sinks.
+
+From the first measurement to the last one, on the same machine and the same model files: 9.4 tokens/s with the weights on one node, 17.1 with a copy per node, 22.9 now; with the draft, 25.6 then and 31.5 now. A prompt is read at 230 to 236 tokens/s in every release measured so far; the last two releases are the first ones aimed at that.
 
 ### DeepSeek-V4.1 on a 2-socket server
 
