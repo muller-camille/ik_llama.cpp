@@ -150,6 +150,9 @@ set_tests_properties(test-flash-attn-threads-drawn-row-groups PROPERTIES ENVIRON
 llama_test(test-flash-attn-threads NAME test-flash-attn-threads-concatenated)
 set_tests_properties(test-flash-attn-threads-concatenated PROPERTIES ENVIRONMENT "GGML_LAZY_CONCAT=0")
 
+llama_build(test-indexer-topk.cpp)
+llama_test(test-indexer-topk)
+
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)
 

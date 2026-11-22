@@ -2418,7 +2418,9 @@ void iqk_bucket_topk(int nval, int ntop, float * values, int * idx, int * idx_in
         for (int k = 0; k < 8; ++k) ++counts[aux[k]];
     }
     for (int j = 8*(ngood/8); j < ngood; ++j) {
-        int i = int(av*values[j] + bv);
+        // rounded as _mm256_cvtps_epi32 rounds above, not cut: a value must never get a better bucket than a
+        // higher one, or it is taken in its place
+        int i = _mm_cvtss_si32(_mm_fmadd_ss(_mm_set_ss(av), _mm_set_ss(values[j]), _mm_set_ss(bv)));
         i = std::max(0, std::min(i, nbucket-1));
         idx_aux[j] = i;
         ++counts[i];
