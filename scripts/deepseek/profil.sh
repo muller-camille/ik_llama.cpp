@@ -17,6 +17,7 @@
 #                chronométrage dit ce que chacune a coûté (les tokens/s de ces passes ne se comparent donc
 #                pas aux autres)
 #              (autre exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0" coupe ces optimisations tour à tour ;
+#              VARS="GGML_INDEXER_512=0" compare l'indexeur AVX-512 à l'ancien, à mesurer avec CONTEXTE=20000 ;
 #              VARS= ne fait que les quatre passes de base)
 #   CONTEXTE   taille du texte long en tokens, 4000 par défaut ; CONTEXTE=0 saute ces passes
 # Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe

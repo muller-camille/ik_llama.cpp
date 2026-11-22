@@ -152,6 +152,9 @@ set_tests_properties(test-flash-attn-threads-concatenated PROPERTIES ENVIRONMENT
 
 llama_build(test-indexer-topk.cpp)
 llama_test(test-indexer-topk)
+# the same cases without the AVX-512 way of iqk_indexer_512.cpp
+llama_test(test-indexer-topk NAME test-indexer-topk-other-way)
+set_tests_properties(test-indexer-topk-other-way PROPERTIES ENVIRONMENT "GGML_INDEXER_512=0")
 
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)

@@ -180,6 +180,7 @@ if (GGML_IQK_MUL_MAT)
     message(STATUS "Using optimized iqk matrix multiplications")
     add_compile_definitions(GGML_USE_IQK_MULMAT)
     set(GGML_SOURCES_IQK_MM iqk/iqk_mul_mat.cpp
+                            iqk/iqk_indexer_512.cpp
                             iqk/iqk_kda.cpp
                             iqk/iqk_flash_attn.cpp
                             iqk/fa/iqk_fa_576_512.cpp
@@ -199,6 +200,7 @@ if (GGML_IQK_MUL_MAT)
                             iqk/iqk_gemm_1bit.cpp
                             iqk/iqk_gemm_legacy_quants.cpp)
     set(GGML_HEADERS_IQK_MM iqk/iqk_mul_mat.h
+                            iqk/iqk_indexer_512.h
                             iqk/iqk_flash_impl.h
                             iqk/fa/iqk_fa_templates.h
                             iqk/iqk_gemm_floats.h
