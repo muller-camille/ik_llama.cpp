@@ -77,6 +77,13 @@ Checked here with version 0.2.2-rc.5 of the harness and a small model in place o
 
 Every release of this fork, what it changed, and what was measured with it on the server of the next section (2 x 16 cores, 200 tokens generated). The figures are tokens per second. "Long prompt" is the generation after a prompt of 3159 to 3165 tokens up to `rhel8-b5345` and of 19714 tokens from `rhel8-b5353` on; "prompt read" is the speed at which that prompt was read. An empty cell was not measured: a release that only fixes something, or that the next one replaced the same day.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/deepseek-releases-dark.svg">
+  <img src="media/deepseek-releases-light.svg" width="920" alt="Line chart of the tokens per second generated, release by release. Without a draft: 9.7 before --numa-mirror, 18.4 with rhel8-b5294, 21.3 with rhel8-b5308, 22.6 with rhel8-b5317, 22.9 with rhel8-b5357. With the DSpark draft: 25.6 with rhel8-b5294, 31.5 with rhel8-b5345.">
+</picture>
+
+The chart takes, for each release that was measured, the short-prompt figures of the table below at the best thread count measured (64 threads up to `rhel8-b5301`, 32 from `rhel8-b5308` on). `python3 scripts/release-chart.py` draws it again from the figures written in that script.
+
 | Release | What it changed | Threads | Short prompt | With the draft | Long prompt | Long prompt, draft | Prompt read |
 |---|---|---|---|---|---|---|---|
 | `rhel8-b5284`, 19 Nov | First release: CPU binaries for RHEL 8 (glibc 2.28). The DeepSeek-V4.1 GGUFs of upstream llama.cpp load as they are, MXFP8 engram table included. | | | | | | |
