@@ -17,6 +17,11 @@ on:
         required: true
         type: boolean
         default: true
+      test_harness:
+        description: 'Also try DeepSeek Harness (dsh) with harness.sh on the RHEL 8.10 image'
+        required: false
+        type: boolean
+        default: false
   push:
     tags: ['rhel8-*']
   pull_request:
@@ -30,6 +35,9 @@ env:
   TEST_IMAGE: registry.access.redhat.com/ubi8/ubi:8.10
   TEST_MODEL_URL: https://huggingface.co/ggml-org-dev/stories15M/resolve/main/stories15M-q4_0.gguf
   TOOLS: llama-server llama-cli llama-sweep-bench llama-bench llama-quantize llama-gguf-split
+  # for the optional test of harness.sh: Node.js from nodejs.org and DeepSeek Harness from npm
+  NODE_VERSION: 24.22.3
+  DSH_VERSION: 0.2.2-rc.5
 
 concurrency:
   group: release-rhel8-${{ github.ref }}
@@ -109,6 +117,9 @@ jobs:
 
     permissions:
       contents: write # for creating the tag and the release
+
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
 
     steps:
       - name: Clone
@@ -285,6 +296,7 @@ jobs:
           - \`profil.sh\`: the same with \`GGML_PROFILE=1\`, after a short and after a long prompt, in passes that each turn one optimization off
           - \`drafter.sh\`: tries several settings of the DSpark draft
           - \`recompresser.sh\`: requantizes the non-expert \`Q8_0\` tensors and installs the result next to the model
+          - \`harness.sh\`: starts [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (\`dsh\`, to be installed apart: Node.js 24.9 or newer, \`npm install -g @deepseek-ai/dsh\`) with the server in the place of DeepSeek's API
           EOF
 
           ARGS=()
@@ -296,3 +308,56 @@ jobs:
             --title "$TAG (RHEL 8, CPU)" \
             --notes-file notes.md \
             "${ARGS[@]}"
+
+  # DeepSeek Harness is not part of the package. This job only shows that it starts on RHEL 8.10 and that
+  # harness.sh connects it to the server of the package; the small model of the test cannot call tools.
+  harness:
+    name: DeepSeek Harness on RHEL 8.10
+    needs: package
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_harness }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: ik_llama-${{ needs.package.outputs.tag }}-bin-rhel8-x64
+
+      - name: Run harness.sh on RHEL 8.10 (UBI image)
+        env:
+          TAG: ${{ needs.package.outputs.tag }}
+        run: |
+          mkdir pkg
+          tar -xzf "ik_llama-${TAG}-bin-rhel8-x64.tar.gz" -C pkg
+          # the template that Unsloth's GGUF files of DeepSeek-V4.1 carry: the one a server of the model works with
+          cp models/templates/unsloth-DeepSeek-V4.1-Flash-1017.jinja pkg/
+          curl -fsSL --retry 3 -o pkg/stories15M-q4_0.gguf "$TEST_MODEL_URL"
+          docker run --rm -i -v "$PWD/pkg:/pkg:ro" -w "/pkg/ik_llama-${TAG}" -e TAG -e NODE_VERSION -e DSH_VERSION "$TEST_IMAGE" bash -e -s <<'EOF'
+          cat /etc/redhat-release
+          curl -fsSL --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" | tar -xz -C /opt
+          export PATH="/opt/node-v${NODE_VERSION}-linux-x64/bin:$PATH"
+          node --version
+          npm install -g --no-fund --no-audit "@deepseek-ai/dsh@${DSH_VERSION}" > /tmp/npm.log 2>&1 || { tail -40 /tmp/npm.log; exit 1; }
+          dsh --version
+
+          ./llama-server -m /pkg/stories15M-q4_0.gguf --jinja --chat-template-file /pkg/unsloth-DeepSeek-V4.1-Flash-1017.jinja \
+              --api-key sk-test --port 8080 -c 32768 -n 32 -t 2 > /tmp/server.log 2>&1 &
+          for i in $(seq 60); do curl -sf http://127.0.0.1:8080/health > /dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:8080/health
+
+          # the agent runs with an account of its own, as harness.sh asks
+          useradd -m agent
+          cd /home/agent
+          su agent -c "PATH='$PATH' API_KEY=sk-test PORT=8080 CTX=32768 SORTIE=4096 '/pkg/ik_llama-${TAG}/harness.sh' headless --json 'Say hello.'" > /tmp/run.jsonl 2> /tmp/run.err || true
+          cat /tmp/run.jsonl
+          cat /tmp/run.err
+          grep -E 'POST /v1/messages|"path":"/v1/messages"' /tmp/server.log | head -3 || true
+          # an answer came back from the server through the harness, and nothing failed on the way
+          grep -q '"type":"final"' /tmp/run.jsonl
+          grep -q '"phase":"step_end"' /tmp/run.jsonl
+          ! grep -q '"kind":"error"' /tmp/run.jsonl
+          EOF
+
