@@ -15,9 +15,11 @@
 #   SPEC     réglage du drafter, dspark:n_max=4 par défaut
 #   T        threads, un par cœur physique par défaut
 #   CTX      contexte, 131072 par défaut
-#   UBATCH   tokens du prompt lus ensemble, 512 par défaut (celui du serveur). Les poids des experts sont
-#            lus en RAM une fois par lot, quelle que soit sa taille : un lot plus grand (1024, 2048) lit un
-#            long prompt plus vite, à mesurer avec profil.sh
+#   UBATCH   tokens du prompt lus ensemble (option -ub du serveur), 2048 par défaut. Avec --swa-compress, les
+#            19 dernières couches de DeepSeek-V4.1 ne sont calculées que sur les 256 derniers tokens de chaque
+#            lot : plus le lot est grand, moins de tokens du prompt y passent. Mesuré sur 2 x 16 cœurs avec un
+#            prompt de 15761 tokens : 245 tokens/s par lots de 512, 329 par lots de 2048. La vitesse du texte
+#            produit ne change pas. UBATCH=512 revient au réglage du serveur.
 #   WEBUI    page web du serveur : llamacpp (celle de llama.cpp, par défaut), auto (celle d'ik_llama.cpp)
 #            ou none (aucune)
 #
@@ -65,7 +67,7 @@ HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8080}
 T=${T:-$COEURS}
 CTX=${CTX:-131072}
-UBATCH=${UBATCH:-}
+UBATCH=${UBATCH:-2048}
 WEBUI=${WEBUI:-llamacpp}
 
 # --- vérifications ---------------------------------------------------------
@@ -120,7 +122,7 @@ ARGS=(-m "/mnt/ds0/$M-00001-of-00009.gguf" --numa-mirror /mnt/ds1
       -t "$T" -c "$CTX" -cram 100000 --jinja --swa-compress --host "$HOST" --port "$PORT" --webui "$WEBUI")
 [ -z "$API_KEY" ] || ARGS+=(--api-key "$API_KEY")
 [ -z "$DRAFT" ]   || ARGS+=(-md "/mnt/ds0/$DRAFT" --spec-type "$SPEC")
-[ -z "$UBATCH" ]  || ARGS+=(-b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH")
+ARGS+=(-b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH")
 echo "== Démarrage du serveur sur $HOST:$PORT, $T threads, modèle $M (Ctrl+C pour l'arrêter)"
 cd "$IK_DIR"
 exec numactl --interleave=all ./llama-server "${ARGS[@]}"

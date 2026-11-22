@@ -18,10 +18,11 @@
 #                pas aux autres)
 #              (autre exemple : VARS="GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0" coupe ces optimisations tour à tour ;
 #              VARS="GGML_INDEXER_512=0" compare l'indexeur AVX-512 à l'ancien, à mesurer avec CONTEXTE=20000 ;
-#              VARS="UBATCH=2048" lit le prompt par lots de 2048 tokens au lieu de 512 : ce n'est pas une
+#              VARS="UBATCH=512" lit le prompt par lots de 512 tokens au lieu de 2048 : ce n'est pas une
 #              variable du serveur mais son option -ub, la ligne « texte lu » dit ce que cela change ;
 #              VARS= ne fait que les quatre passes de base)
 #   CONTEXTE   taille du texte long en tokens, 4000 par défaut ; CONTEXTE=0 saute ces passes
+#   UBATCH     tokens du prompt lus ensemble dans toutes les passes, 2048 par défaut comme deepseek.sh
 # Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe
 # à l'autre dès le premier token : il suffit que deux tokens soient presque à égalité et qu'un arrondi
 # change. Il doit rester un texte sensé.
@@ -64,6 +65,7 @@ T=${T:-$COEURS}        # threads des passes principales
 VARS=${VARS-GGML_LAZY_CONCAT=0 GGML_FA_ROW_GROUPS=-1}
 CONTEXTE=${CONTEXTE:-4000}
 CTX=${CTX:-131072}
+UBATCH=${UBATCH:-2048}
 SPEC=${SPEC:-dspark:n_max=4}
 API_KEY=mesure         # clé du serveur que ce script lance pour lui seul, sur 127.0.0.1
 PORT=${PORT_MESURE:-8080}
@@ -120,10 +122,12 @@ passe() {
                 --api-key "$API_KEY" --host 127.0.0.1 --port "$PORT")
     [ -z "$MIRROR" ] || args+=(--numa-mirror "$MIRROR")
     [ -z "$draft" ]  || args+=(-md "$draft" --spec-type "$SPEC")
-    # UBATCH=<n> parmi les réglages : la taille des lots du prompt, une option du serveur
+    # la taille des lots du prompt, une option du serveur : celle de UBATCH, ou d'un UBATCH=<n> parmi les réglages
+    v=$UBATCH
     case $var in
-        UBATCH=*) v=${var#UBATCH=}; args+=(-b "$((v > 2048 ? v : 2048))" -ub "$v") ;;
+        UBATCH=*) v=${var#UBATCH=} ;;
     esac
+    args+=(-b "$((v > 2048 ? v : 2048))" -ub "$v")
 
     dire ""
     if [ "$contexte" -gt 0 ]; then

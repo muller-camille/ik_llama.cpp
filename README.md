@@ -37,19 +37,19 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5361/ik_llama-rhel8-b5361-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5361-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5361/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5369/ik_llama-rhel8-b5369-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5369-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5369/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
 
 | Script | What it does |
 |---|---|
-| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server; with the draft model, its repacked file (`llama-quantize --repack <drafter> <drafter>-R8.gguf Q8_0_R8`) when that is in the folder of the model files: a draft call took 9.5 ms instead of 11.5 with it. `UBATCH=<n>` sets how many tokens of a prompt are read together (the server's `-ub`, 512 by default): in a batch of 512 tokens nearly every expert of every layer is used, so all the expert weights are read from the memory once per batch, a third of its time at the speed of the memory. A larger batch reads them once for more tokens: on the 2-socket server a prompt of 15761 tokens is read at 329 tokens/s with `UBATCH=2048`, against 245. `profil.sh` measures it on another machine |
+| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server; with the draft model, its repacked file (`llama-quantize --repack <drafter> <drafter>-R8.gguf Q8_0_R8`) when that is in the folder of the model files: a draft call took 9.5 ms instead of 11.5 with it. The prompt is read in batches of 2048 tokens (`UBATCH`, the server's `-ub`; the server's own default is 512). With `--swa-compress` the 19 decoder layers of DeepSeek-V4.1 are computed for the last 256 tokens of a batch only, so the larger the batch, the smaller the share of the prompt that goes through them: one token in eight instead of one in two. The expert weights, which are read from the memory once per batch, serve four times the tokens as well. On the 2-socket server a prompt of 15761 tokens is read at 329 tokens/s in batches of 2048 against 245 in batches of 512, and the text after it is generated at the same speed. `UBATCH=512` goes back to the server's default |
 | `charger-deepseek.sh` | the loading alone, as root |
 | `mesure.sh` | starts a server of its own and measures the speed, with or without a draft |
-| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting: an environment switch, or `UBATCH=<n>` for the size of the prompt batches |
+| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting: an environment switch, or `UBATCH=<n>` for the size of the prompt batches (`VARS="UBATCH=512"` compares with the server's default) |
 | `drafter.sh` | tries several settings of the DSpark draft |
 | `recompresser.sh` | requantizes the non-expert `Q8_0` tensors and installs the result next to the model |
 | `harness.sh` | starts [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`: an agent with a web UI and a command line) with this server in the place of DeepSeek's API, see below |
@@ -89,7 +89,7 @@ The chart takes, for each release that was measured, the short-prompt figures of
   <img src="media/deepseek-prompt-light.svg" width="920" alt="Bar chart of the tokens per second at which rhel8-b5361 reads a prompt of 15761 tokens: 236 with the former indexer, 245 with the AVX-512 indexer, 329 with the AVX-512 indexer and batches of 2048 tokens.">
 </picture>
 
-The reading of a long prompt did not move before `rhel8-b5360`. The three bars are one prompt read by one build, `rhel8-b5361`, with one setting changed at a time: the indexer gives 4%, the batches of 2048 tokens 34% more. The generation after that prompt runs at the same speed in the three cases, within what two runs differ by.
+The reading of a long prompt did not move before `rhel8-b5360`. The three bars are one prompt read by one build, `rhel8-b5361`, with one setting changed at a time: the indexer gives 4%, the batches of 2048 tokens 34% more. With `--swa-compress` the server computes the 19 decoder layers of DeepSeek-V4.1 for the last 256 tokens of a batch only: in batches of 2048 that is one token of the prompt in eight instead of one in two. The generation after that prompt runs at the same speed in the three cases, within what two runs differ by.
 
 | Release | What it changed | Threads | Short prompt | With the draft | Long prompt | Long prompt, draft | Prompt read |
 |---|---|---|---|---|---|---|---|
@@ -128,9 +128,10 @@ The reading of a long prompt did not move before `rhel8-b5360`. The three bars a
 | `rhel8-b5353` | Unsloth's chat template is recognized as DeepSeek's, so the tool-call handling of `rhel8-b5347` reaches a server started from Unsloth's files. Prompts as DeepSeek's reference builds them. One run. A request that ends in a tool call, with the draft: 33.9. | 32 | 22.1 | | 21.2 | | 230 |
 | `rhel8-b5357` | Fix: in `rhel8-b5350` to `rhel8-b5353` the result of an attention node could be written over cache rows it still had to read, when several tokens were decoded together with one row group: wrong values, and an abort after the 19714-token prompt with `GGML_FA_ROW_GROUPS=1` or `-1`. `GGML_POISON=1`. One run. | 32 | 22.9 | | 21.2 | | 230 |
 | `rhel8-b5360` | The indexer of DeepSeek-V4 with AVX-512: 5% to 10% of a prompt batch and 3% of a generated token went there at 20000 tokens of context. On 4 cores, a batch of 512 tokens over 5120 rows takes 28 ms instead of 160. Fix of the rounding of the buckets in the former way. Measured with the next release. | | | | | | |
-| `rhel8-b5361` | `UBATCH=<n>` in `deepseek.sh` and `profil.sh`: the size of the prompt batches. The expert weights are read from the memory once per batch, a third of the time of a 512-token batch. One run. With the indexer of `rhel8-b5360`, `INDEXER_TOPK` takes 30 ms of a 512-token batch instead of 108, and 0.55 ms of a generated token instead of 1.03. | 32 | 22.2 | | 21.1 | | 245 |
+| `rhel8-b5361` | `UBATCH=<n>` in `deepseek.sh` and `profil.sh` sets the size of the prompt batches, still 512 unless it is set. One run. With the indexer of `rhel8-b5360`, `INDEXER_TOPK` takes 30 ms of a 512-token batch instead of 108, and 0.55 ms of a generated token instead of 1.03. | 32 | 22.2 | | 21.1 | | 245 |
 | | The same with `GGML_INDEXER_512=0`, the former indexer | 32 | 22.6 | | 21.6 | | 236 |
-| | The same with `UBATCH=2048`: the expert nodes take 0.90 ms per token of the prompt instead of 1.46, and they no longer wait for the memory | 32 | 22.5 | | 21.7 | | 329 |
+| | The same with `UBATCH=2048`: the 19 decoder layers, computed for the last 256 tokens of a batch only, see one token of the prompt in eight instead of one in two; a batch takes 2.63 ms per token plus 0.71 s | 32 | 22.5 | | 21.7 | | 329 |
+| `rhel8-b5369` | The scripts read the prompt in batches of 2048 tokens unless `UBATCH` says otherwise. The binaries are built from the sources of `rhel8-b5361`, whose line above gives the figures. | | | | | | |
 
 From `rhel8-b5297` on the figures are means of 5 runs, except where one run is said; before, they are single requests. The runs of one build differ by up to 3%. Those with the draft (DSpark, `n_max=4`) also move with the share of draft tokens the model accepts, which depends on the text: 58% to 74% in these runs. `rhel8-b5340` to `rhel8-b5345` generate another text than `rhel8-b5317` because of the fix of the sinks.
 
