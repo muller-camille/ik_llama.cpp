@@ -333,7 +333,6 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
 
             json tool_calls = json::array();
             json converted_content = json::array();
-            json tool_results = json::array();
             std::string reasoning_content;
             bool has_tool_calls = false;
 
@@ -394,7 +393,13 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                         }
                     }
 
-                    tool_results.push_back({
+                    // The blocks keep their order: a result answers the call of the assistant right before it, and
+                    // the text that the client puts after the results comes after them, not before.
+                    if (!converted_content.empty()) {
+                        oai_messages.push_back({ {"role", role}, {"content", converted_content} });
+                        converted_content = json::array();
+                    }
+                    oai_messages.push_back({
                         {"role", "tool"},
                         {"tool_call_id", tool_use_id},
                         {"content", result_text}
@@ -417,10 +422,6 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                 }
                 oai_messages.push_back(new_msg);
             }
-
-            for (const auto & tool_msg : tool_results) {
-                oai_messages.push_back(tool_msg);
-            }
         }
     }
 
@@ -432,13 +433,17 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         if (tools.is_array()) {
             json oai_tools = json::array();
             for (const auto & tool : tools) {
+                json function = {
+                    {"name", json_value(tool, "name", std::string())},
+                    {"description", json_value(tool, "description", std::string())},
+                    {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
+                };
+                if (tool.contains("strict") && tool.at("strict").is_boolean()) {
+                    function["strict"] = tool.at("strict");
+                }
                 oai_tools.push_back({
                     {"type", "function"},
-                    {"function", {
-                        {"name", json_value(tool, "name", std::string())},
-                        {"description", json_value(tool, "description", std::string())},
-                        {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
-                    }}
+                    {"function", function}
                     });
             }
             oai_body["tools"] = oai_tools;
@@ -454,6 +459,8 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                 oai_body["tool_choice"] = "auto";
             } else if (type == "any" || type == "tool") {
                 oai_body["tool_choice"] = "required";
+            } else if (type == "none") {
+                oai_body["tool_choice"] = "none";
             }
         }
     }
@@ -477,13 +484,26 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         }
     }
 
-    // Handle Anthropic-specific thinking param
+    // Handle Anthropic-specific thinking param. "enabled" and "disabled" also turn the reasoning of the template
+    // on and off. A budget is set only when the request names one: DeepSeek's Messages API, and the clients
+    // written for it, enable the reasoning without a budget and give its amount in "output_config".
     if (body.contains("thinking")) {
         json thinking = json_value(body, "thinking", json::object());
         std::string thinking_type = json_value(thinking, "type", std::string());
-        if (thinking_type == "enabled") {
+        if (thinking_type == "enabled" && thinking.contains("budget_tokens")) {
             int budget_tokens = json_value(thinking, "budget_tokens", 10000);
             oai_body["thinking_budget_tokens"] = budget_tokens;
+        }
+        if (thinking_type == "enabled" || thinking_type == "disabled") {
+            oai_body["thinking"] = json {{"type", thinking_type}};
+        }
+    }
+
+    // "output_config": {"effort": ...}: how much reasoning, the "reasoning_effort" of the chat completions
+    if (body.contains("output_config") && body.at("output_config").is_object()) {
+        const json & output_config = body.at("output_config");
+        if (output_config.contains("effort") && output_config.at("effort").is_string()) {
+            oai_body["reasoning_effort"] = output_config.at("effort");
         }
     }
 

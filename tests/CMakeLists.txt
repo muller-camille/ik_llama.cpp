@@ -234,6 +234,7 @@ llama_build_and_test(test-chat-auto-parser.cpp WORKING_DIRECTORY ${PROJECT_SOURC
 llama_build_and_test(test-chat-template.cpp )
 # what the grammar of a tool call lets the model write, for a tool declared as Metabase declares its query builder
 llama_build_and_test(test-tool-args-grammar.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+llama_build_and_test(test-deepseek-api-fields.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 llama_build_and_test(test-json-partial.cpp )
 llama_build_and_test(test-cpu-affinity.cpp )
 llama_build_and_test(test-nanbeige-loop.cpp )

@@ -263,6 +263,29 @@ common_chat_tool_choice common_chat_tool_choice_parse_oaicompat(const std::strin
     throw std::invalid_argument("Invalid tool_choice: " + tool_choice);
 }
 
+void common_chat_reasoning_kwargs_parse_oaicompat(const json & body, std::map<std::string, std::string> & chat_template_kwargs) {
+    if (!body.is_object()) {
+        return;
+    }
+    const auto thinking = body.find("thinking");
+    if (thinking != body.end() && thinking->is_object()) {
+        const std::string type = thinking->value("type", std::string());
+        if (type == "enabled") {
+            chat_template_kwargs["enable_thinking"] = "true";
+        } else if (type == "disabled") {
+            chat_template_kwargs["enable_thinking"] = "false";
+        }
+    }
+    const auto effort = body.find("reasoning_effort");
+    if (effort != body.end()) {
+        if (effort->is_string() && (*effort == "none" || *effort == "off")) {
+            chat_template_kwargs["enable_thinking"] = "false";
+        } else if (effort->is_string() || effort->is_number_integer()) {
+            chat_template_kwargs["reasoning_effort"] = effort->dump();
+        }
+    }
+}
+
 bool common_chat_templates_support_enable_thinking(const common_chat_templates * chat_templates) {
     common_chat_templates_inputs inputs;
     inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
@@ -2047,8 +2070,13 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
             tool_calls = p.optional(tool_calls);
         }
 
-        auto content_before_tools = p.content(p.until(FC_START));
-        return generation_prompt + reasoning + content_before_tools + tool_calls + end;
+        // The model writes the block of calls two line breaks after its text, and the template writes them again
+        // when the message comes back in the history. They are not part of the text: a client that sends back
+        // what it received would otherwise get them twice in the prompt, which is then no longer what the model
+        // wrote (and what the server holds in its cache). The line breaks at the very end of an answer without a
+        // call go the same way: nothing tells them from the ones that announce a call.
+        auto content_before_tools = p.content(p.until_one_of({ "\n\n" + FC_START, "\n" + FC_START, FC_START }));
+        return generation_prompt + reasoning + content_before_tools + p.space() + tool_calls + end;
     });
 
     data.parser = parser.save();
@@ -2997,6 +3025,37 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
     return std::nullopt;
 }
 
+// DeepSeek-V4.1 takes low, high, max or a number from 1 to 100 as `reasoning_effort` and refuses anything else.
+// The levels the other APIs name are brought to its own the way DeepSeek's API takes them: medium as high, xhigh
+// as max (and minimal as low). A value that is none of these is left out, so that the request of a client that
+// sends one is answered with the default amount of reasoning instead of an error.
+static void deepseek_reasoning_effort(json & extra_context) {
+    const auto it = extra_context.find("reasoning_effort");
+    if (it == extra_context.end() || it->is_null()) {
+        return;
+    }
+    if (it->is_number_integer()) {
+        const auto budget = it->get<int64_t>();
+        if (budget >= 1 && budget <= 100) {
+            return;
+        }
+    } else if (it->is_string()) {
+        const std::string effort = it->get<std::string>();
+        if (effort == "minimal") {
+            *it = "low";
+        } else if (effort == "medium") {
+            *it = "high";
+        } else if (effort == "xhigh") {
+            *it = "max";
+        }
+        if (*it == "low" || *it == "high" || *it == "max") {
+            return;
+        }
+    }
+    LOG_WRN("%s: reasoning_effort %s is not low, high, max or 1..100: the default is used\n", __func__, it->dump().c_str());
+    extra_context.erase(it);
+}
+
 static std::string common_chat_templates_generation_prompt(const common_chat_template & tmpl, const autoparser::generation_params & inputs) {
     autoparser::generation_params params = inputs;
     params.add_generation_prompt = false;
@@ -3055,6 +3114,9 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
     params.extra_context = common_chat_extra_context();
     for (auto el : inputs.chat_template_kwargs) {
         params.extra_context[el.first] = json::parse(el.second);
+    }
+    if (src.find("dsml_token") != std::string::npos) {
+        deepseek_reasoning_effort(params.extra_context);
     }
 
     if (!inputs.json_schema.empty()) {

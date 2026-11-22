@@ -23,6 +23,7 @@ This repository follows [ikawrakow/ik_llama.cpp](https://github.com/ikawrakow/ik
 | Attention sinks for a token decoded alone | With one query token and one K/V head, two of the three ways the threads share the attention left the sinks out of the softmax: a token decoded alone did not get the result of the same token in a batch. They are applied everywhere now. | |
 | Profile | For every kind of node: time per token, how busy the threads were, how fast the weights were read. For the attention above: how many nodes went which way, with how many groups of rows, and how long they took. | `GGML_PROFILE=1` |
 | Tool arguments (DeepSeek tool calls) | The grammar that holds a tool call to the schema of the tool took `{}`, the schema that accepts anything, for "a JSON object" wherever it stood: in an array declared `"items": {}` the model could only write objects. Metabase declares the table and every clause of its query builder that way, so a model could not write a query for it and called the tool again and again. `{}` inside a schema is now any value. The arguments of a tool that does not say `"strict": true` are also held as JSON Schema means them, not as an output format: properties in any order, and others than those the schema names (Metabase's `limit`); types, `const`, `enum` and array lengths still apply. A JSON answer asked for with `response_format` is as strict as before. | `LLAMA_TOOL_ARGS_STRICT=1` |
+| DeepSeek's API, for the clients written for it | The server takes what a client of DeepSeek's API sends: `"thinking": {"type": "enabled" \| "disabled"}` turns the reasoning on or off, and `"reasoning_effort"` (chat completions) or `"output_config": {"effort": ...}` (`/v1/messages`) sets its amount: `low`, `high`, `max` or a number from 1 to 100, with the levels of the other APIs brought to these (`medium` as `high`, `xhigh` as `max`, `none` as no reasoning; any other value gets the default). A request's own `chat_template_kwargs` still wins. On `/v1/messages`, a block of a tool call opens with `"input": {}` as Anthropic's API opens it (a client may refuse it otherwise), the results of tools and the text after them keep their order, and reasoning is no longer cut at 10000 tokens when the request names no budget. The line breaks the model writes before its block of calls are not given as text of the answer: sent back by the client, they stood twice in the prompt. | |
 | Web UI of llama.cpp | `--webui llamacpp` serves the current web UI of llama.cpp ("Llama Chat"), a build of many files, in place of the older single-page copy. Its files are in `examples/server/public_llamacpp`, with the commit they were built from; `scripts/update-webui-llamacpp.sh` replaces them with a newer build. | `--webui llamacpp` |
 | `llama-quantize ... COPY` with `--custom-q` | Requantizes only the tensors a rule names and copies the rest. With `--keep-split --partial-requant` only the split files that change are written. | |
 | Release for RHEL 8 | CPU-only binaries for glibc 2.28, see below. | |
@@ -34,9 +35,9 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5350/ik_llama-rhel8-b5350-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5350-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5350/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5352/ik_llama-rhel8-b5352-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5352-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5352/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
@@ -49,6 +50,26 @@ A package also holds the shell scripts used on the 2-socket machine below (`scri
 | `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting |
 | `drafter.sh` | tries several settings of the DSpark draft |
 | `recompresser.sh` | requantizes the non-expert `Q8_0` tensors and installs the result next to the model |
+| `harness.sh` | starts [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`: an agent with a web UI and a command line) with this server in the place of DeepSeek's API, see below |
+
+### DeepSeek Harness
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) is DeepSeek's open-source agent: a web UI, a command line and a headless mode around a model that reads and edits files and runs commands. Its own adapter for DeepSeek's API speaks the Messages protocol, which the server has at `/v1/messages`, and its model `deepseek-flash` is DeepSeek-V4.1 Flash. `harness.sh` starts it with the server of `deepseek.sh` in the place of that API:
+
+```
+npm install -g @deepseek-ai/dsh        # once; needs Node.js 24.9 or newer
+./harness.sh                           # web UI on 127.0.0.1:3080, the address to open is printed
+./harness.sh headless "run the tests"  # one task, the answer on the output
+```
+
+The script reads `API_KEY`, `HOST`, `PORT` and `CTX` from `~/.deepseek.conf` like the others (`SERVEUR=http://host:8080` for a server on another machine) and gives the harness an overlay (`dsh --patch`) that is rewritten at each start: the address of the server, the size of its context, so that the harness summarizes the conversation before the server runs out of it, and the reasoning level (`EFFORT=off|low|high|max`, also chosen in the UI). Nothing is written into the profiles of the harness, and the other providers set there stay as they are. The key is passed in the environment, not in a file.
+
+- The agent runs, on the machine and with the account that start it, the commands the model decides to run. Start it in a work folder, with an account that has only the rights it should have; the script refuses to run as root unless told to (`EN_ROOT=1`, for a container).
+- The web UI listens on this machine only. From another machine: `ssh -L 3080:127.0.0.1:3080 user@server`, then the printed address. `H_HOST` binds another address; over plain HTTP the address, which carries the access token, then travels in clear.
+- The harness has telemetry towards DeepSeek, by default with the feedback a user submits; the script turns it off (`DSH_TELEMETRY_DISABLED`), and `TELEMETRIE=1` leaves it as the harness sets it.
+- The server has one slot: the agents the harness can run side by side take turns on it.
+
+Checked here with version 0.2.2-rc.5 of the harness and a small model in place of DeepSeek-V4.1: the web UI and the headless mode, a tool call and its result through the server and back, with and without internet access. The release workflow can repeat the headless run on a RHEL 8.10 image (`test_harness`).
 
 ### DeepSeek-V4.1 on a 2-socket server
 

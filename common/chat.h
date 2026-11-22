@@ -261,6 +261,13 @@ common_reasoning_format common_reasoning_format_from_name(const std::string & fo
 
 common_chat_tool_choice common_chat_tool_choice_parse_oaicompat(const std::string & tool_choice);
 
+// The reasoning controls of a chat request the way DeepSeek's API and the clients written for it send them,
+// `"thinking": {"type": "enabled" | "disabled"}` and `"reasoning_effort"`, as the template arguments
+// `enable_thinking` and `reasoning_effort` (written in JSON, as `chat_template_kwargs` holds its values).
+// An effort of "none" or "off" turns the reasoning off.
+void common_chat_reasoning_kwargs_parse_oaicompat(const nlohmann::ordered_json &       body,
+                                                  std::map<std::string, std::string> & chat_template_kwargs);
+
 bool common_chat_templates_support_enable_thinking(const common_chat_templates * chat_templates);
 
 // Parses a JSON array of messages in OpenAI's chat completion API format.
