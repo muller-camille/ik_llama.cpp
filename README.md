@@ -37,19 +37,19 @@ The switches are environment variables. The optimizations are on by default, and
 The [releases](https://github.com/muller-camille/ik_llama.cpp/releases) named `rhel8-b<number>` are CPU-only builds for RHEL 8.10 (Linux x64, glibc 2.28). A package holds three static builds (`avx2`, `avx512`, `avx512-bf16`) and launchers that start the one matching the CPU; nothing has to be installed. The workflow is `.github/workflows/release-rhel8.yml`.
 
 ```
-curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5360/ik_llama-rhel8-b5360-bin-rhel8-x64.tar.gz
-tar xzf ik_llama-rhel8-b5360-bin-rhel8-x64.tar.gz
-./ik_llama-rhel8-b5360/llama-server --version
+curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5361/ik_llama-rhel8-b5361-bin-rhel8-x64.tar.gz
+tar xzf ik_llama-rhel8-b5361-bin-rhel8-x64.tar.gz
+./ik_llama-rhel8-b5361/llama-server --version
 ```
 
 A package also holds the shell scripts used on the 2-socket machine below (`scripts/deepseek` in this repository; their messages are in French). They use the tools next to them, and read what is specific to the machine (`NFS`, `API_KEY`, `HOST`, ...) from `~/.deepseek.conf`, one `NAME=value` per line:
 
 | Script | What it does |
 |---|---|
-| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server; with the draft model, its repacked file (`llama-quantize --repack <drafter> <drafter>-R8.gguf Q8_0_R8`) when that is in the folder of the model files: a draft call took 9.5 ms instead of 11.5 with it |
+| `deepseek.sh` | loads the model into RAM, one copy of the weights per socket, and starts the server; with the draft model, its repacked file (`llama-quantize --repack <drafter> <drafter>-R8.gguf Q8_0_R8`) when that is in the folder of the model files: a draft call took 9.5 ms instead of 11.5 with it. `UBATCH=<n>` sets how many tokens of a prompt are read together (the server's `-ub`, 512 by default): in a batch of 512 tokens nearly every expert of every layer is used, so all the expert weights are read from the memory once per batch, a third of its time at the speed of the memory. A larger batch reads them once for more tokens; `profil.sh` measures what it gives |
 | `charger-deepseek.sh` | the loading alone, as root |
 | `mesure.sh` | starts a server of its own and measures the speed, with or without a draft |
-| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting |
+| `profil.sh` | the same with `GGML_PROFILE=1`, after a short and after a long prompt, in passes that each change one setting: an environment switch, or `UBATCH=<n>` for the size of the prompt batches |
 | `drafter.sh` | tries several settings of the DSpark draft |
 | `recompresser.sh` | requantizes the non-expert `Q8_0` tensors and installs the result next to the model |
 | `harness.sh` | starts [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`: an agent with a web UI and a command line) with this server in the place of DeepSeek's API, see below |
