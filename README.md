@@ -75,21 +75,21 @@ Checked here with version 0.2.2-rc.5 of the harness and a small model in place o
 
 ### Release by release
 
-Every release of this fork, what it changed, and what was measured with it on the server of the next section (2 x 16 cores, 200 tokens generated). The figures are tokens per second. "Long prompt" is the generation after a prompt of 3159 to 3165 tokens up to `rhel8-b5345` and of 19714 tokens from `rhel8-b5353` on (15761 for `rhel8-b5361`); "prompt read" is the speed at which that prompt was read. An empty cell was not measured: a release that only fixes something, or that the next one replaced the same day.
+Every release of this fork, what it changed, and what was measured with it on the server of the next section (2 x 16 cores, 200 tokens generated). The figures are tokens per second. "Long prompt" is the generation after a prompt of 3159 to 3165 tokens up to `rhel8-b5345` and of 19714 tokens from `rhel8-b5353` on (15761 for `rhel8-b5361`, 12616 for `rhel8-b5371`); "prompt read" is the speed at which that prompt was read. An empty cell was not measured: a release that only fixes something, or that the next one replaced the same day.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="media/deepseek-releases-dark.svg">
-  <img src="media/deepseek-releases-light.svg" width="920" alt="Line chart of the tokens per second generated, release by release. Without a draft: 9.7 before --numa-mirror, 18.4 with rhel8-b5294, 21.3 with rhel8-b5308, 22.6 with rhel8-b5317, 22.9 with rhel8-b5357. With the DSpark draft: 25.6 with rhel8-b5294, 31.5 with rhel8-b5345.">
+  <img src="media/deepseek-releases-light.svg" width="920" alt="Line chart of the tokens per second generated, release by release. Without a draft: 9.7 before --numa-mirror, 18.4 with rhel8-b5294, 21.3 with rhel8-b5308, 22.6 with rhel8-b5317, 23.0 with rhel8-b5371. With the DSpark draft: 25.6 with rhel8-b5294, 31.5 with rhel8-b5345, 30.9 with rhel8-b5371.">
 </picture>
 
 The chart takes, for each release that was measured, the short-prompt figures of the table below at the best thread count measured (64 threads up to `rhel8-b5301`, 32 from `rhel8-b5308` on). `python3 scripts/release-chart.py` draws it again from the figures written in that script.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="media/deepseek-prompt-dark.svg">
-  <img src="media/deepseek-prompt-light.svg" width="920" alt="Bar chart of the tokens per second at which rhel8-b5361 reads a prompt of 15761 tokens: 236 with the former indexer, 245 with the AVX-512 indexer, 329 with the AVX-512 indexer and batches of 2048 tokens.">
+  <img src="media/deepseek-prompt-light.svg" width="920" alt="Bar chart of the tokens per second at which rhel8-b5371 reads a prompt of 12616 tokens: 241 in batches of 512 tokens, 315 in batches of 2048 with the former indexer, 326 in batches of 2048, 325 in batches of 4096, 339 in batches of 2048 with 64 threads.">
 </picture>
 
-The reading of a long prompt did not move before `rhel8-b5360`. The three bars are one prompt read by one build, `rhel8-b5361`, with one setting changed at a time: the indexer gives 4%, the batches of 2048 tokens 34% more. With `--swa-compress` the server computes the 19 decoder layers of DeepSeek-V4.1 for the last 256 tokens of a batch only: in batches of 2048 that is one token of the prompt in eight instead of one in two. The generation after that prompt runs at the same speed in the three cases, within what two runs differ by.
+The reading of a long prompt did not move before `rhel8-b5360`. The bars are one build, `rhel8-b5371`, with one setting changed at a time, each one the mean of 3 readings of a new text of 12616 tokens. Batches of 2048 tokens instead of 512 give 35%: with `--swa-compress` the server computes the 19 decoder layers of DeepSeek-V4.1 for the last 256 tokens of a batch only, in batches of 2048 one token of the prompt in eight instead of one in two. Batches of 4096 give nothing more: the attention of the other 21 layers costs more per token as the batch grows (34, 40 and 48 microseconds per token and layer at 512, 2048 and 4096), and that takes back what the decoder layers give. The AVX-512 indexer gives 3.5%. One thread per logical CPU reads 4% faster than one per core, and generates 5% to 11% slower after that prompt, so the scripts keep one per core. The generation after the prompt runs at the same speed whatever the batch size.
 
 | Release | What it changed | Threads | Short prompt | With the draft | Long prompt | Long prompt, draft | Prompt read |
 |---|---|---|---|---|---|---|---|
@@ -133,11 +133,16 @@ The reading of a long prompt did not move before `rhel8-b5360`. The three bars a
 | | The same with `UBATCH=2048`: the 19 decoder layers, computed for the last 256 tokens of a batch only, see one token of the prompt in eight instead of one in two; a batch takes 2.63 ms per token plus 0.71 s | 32 | 22.5 | | 21.7 | | 329 |
 | `rhel8-b5369` | The scripts read the prompt in batches of 2048 tokens unless `UBATCH` says otherwise. The binaries are built from the sources of `rhel8-b5361`, whose line above gives the figures. | | | | | | |
 | `rhel8-b5370` | `profil.sh` measures in one run without and with the drafter, with one thread per core and one per logical CPU, after a short and after a long prompt, and ends with a table of the passes. Same sources for the binaries. | | | | | | |
-| `rhel8-b5371` | `profil.sh` by default: every switch compared, batches of 512 and of 4096 tokens, 5 tries per pass of which 3 read a new long text, the lowest and the highest try in the table. `RAPIDE=1` for the short version. Same sources for the binaries. | | | | | | |
+| `rhel8-b5371` | `profil.sh` by default: every switch compared, batches of 512 and of 4096 tokens, 5 tries per pass of which 3 read a new long text, the lowest and the highest try in the table. `RAPIDE=1` for the short version. Same sources for the binaries: these are the figures of `rhel8-b5361` measured properly, 5 tries each, the prompt read 3 times. | 32 | 23.0 | 30.9 | 21.4 | 26.4 | 326 |
+| | | 64 | 21.7 | 33.4 | 20.3 | 23.4 | 339 |
+| | The same with `UBATCH=512`, then with `UBATCH=4096` | 32 | | | 21.7, 21.6 | 25.9, 26.2 | 241, 325 |
+| | The same with `GGML_INDEXER_512=0`, the former indexer | 32 | | | 21.5 | 24.4 | 315 |
+| | The same with `IQK_PREFETCH=0`, then `GGML_FA_SKIP_MASKED=0`, then `GGML_HC_PROJ=0`: the three switches that cost the most when they are off | 32 | | | 18.8, 19.7, 20.0 | 23.1, 23.7, 23.7 | 321, 324, 324 |
+| | The same with `GGML_LAZY_CONCAT=0`, then `GGML_SHARE_ROWS=0`, then `GGML_SERIAL_NODES=0`, then `GGML_FA_ROW_GROUPS=-1` | 32 | | | 21.4, 21.4, 21.3, 21.3 | 25.2, 26.2, 26.8, 26.1 | 326, 325, 326, 324 |
 
-From `rhel8-b5297` on the figures are means of 5 runs, except where one run is said; before, they are single requests. The runs of one build differ by up to 3%. Those with the draft (DSpark, `n_max=4`) also move with the share of draft tokens the model accepts, which depends on the text: 58% to 74% in these runs. `rhel8-b5340` to `rhel8-b5345` generate another text than `rhel8-b5317` because of the fix of the sinks.
+From `rhel8-b5297` on the figures are means of 5 runs, except where one run is said; before, they are single requests. The runs of one build differ by up to 3%. Those with the draft (DSpark, `n_max=4`) also move with the share of draft tokens the model accepts, which depends on the text: 55% to 76% in these runs. With `rhel8-b5371` the 5 tries of a pass with the draft go from 24.1 to 27.8 tokens/s, so a difference of less than 1 token/s between two passes with the draft says nothing; that is the case of the four switches of the last line, and of the 33.4 at 64 threads after a short prompt, which had 76% of its draft accepted against 63% for the 30.9 at 32 threads. In all these runs the draft model is the file as downloaded, not the repacked one that `deepseek.sh` takes when it is there. `rhel8-b5340` to `rhel8-b5345` generate another text than `rhel8-b5317` because of the fix of the sinks.
 
-From the first measurement to the last one, on the same machine and the same model files: 9.4 tokens/s with the weights on one node, 17.1 with a copy per node, 22.9 now; with the draft, 25.6 then and 31.5 now. A prompt was read at 230 to 236 tokens/s in every release up to `rhel8-b5357`; `rhel8-b5361` reads one at 245, and at 329 in batches of 2048 tokens.
+From the first measurement to the last one, on the same machine and the same model files: 9.4 tokens/s with the weights on one node, 17.1 with a copy per node, 23.0 now; with the draft, 25.6 then and 31 now. A prompt was read at 230 to 236 tokens/s in every release up to `rhel8-b5357`, and is read at 326 since the scripts of `rhel8-b5369`.
 
 ### DeepSeek-V4.1 on a 2-socket server
 

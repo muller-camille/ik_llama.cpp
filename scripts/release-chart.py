@@ -30,6 +30,7 @@ RELEASES = [
     ("b5353",  22.1, None, None),
     ("b5357",  22.9, None, None),
     ("b5361",  22.2, None, None),
+    ("b5371",  23.0, 30.9, None),
 ]
 
 TITLE    = "Generation speed, release by release"
@@ -39,15 +40,17 @@ NOTE     = ("Best thread count measured for each release. Means of 5 runs; one r
 SERIES   = ("Without a draft", "With the DSpark draft (n_max=4)")
 
 # the reading of a long prompt: what was run, tokens/s. One prompt and one build for all the bars.
-PROMPT_TITLE    = "Reading a prompt of 15761 tokens"
-PROMPT_SUBTITLE = "Tokens per second, rhel8-b5361 on 2 x 16 cores, 32 threads, one run each"
+PROMPT_TITLE    = "Reading a prompt of 12616 tokens"
+PROMPT_SUBTITLE = "Tokens per second, rhel8-b5371 on 2 x 16 cores, 32 threads unless said, means of 3 readings"
 PROMPT = [
-    ("Former indexer, batches of 512 tokens",                 235.9),
-    ("AVX-512 indexer, batches of 512 tokens",                244.8),
-    ("AVX-512 indexer, batches of 2048 tokens (UBATCH=2048)", 329.1),
+    ("Batches of 512 tokens (UBATCH=512)",                   241.3),
+    ("Batches of 2048, former indexer (GGML_INDEXER_512=0)", 315.2),
+    ("Batches of 2048 tokens, what the scripts do",          326.1),
+    ("Batches of 4096 tokens (UBATCH=4096)",                 325.4),
+    ("Batches of 2048 tokens, 64 threads",                   339.2),
 ]
-PROMPT_NOTE = ("The same prompt and the same build for the three bars: GGML_INDEXER_512=0 gives the first one, "
-               "UBATCH=2048 the last one.")
+PROMPT_NOTE = ("One build and one setting changed at a time, without the drafter. With the drafter loaded the "
+               "figures are the same within 1% at 32 threads.")
 
 THEMES = {
     "light": dict(surface="#fcfcfb", border="#e1e0d9", primary="#0b0b0b", secondary="#52514e", muted="#898781",

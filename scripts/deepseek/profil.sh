@@ -199,6 +199,11 @@ fi
     echo "=== machine"
     "$IK_DIR/llama-server" --version 2>&1 | head -1
     lscpu | grep -E "^(Model name|Socket|Core|Thread)" || true
+    # ce dont dépendent les prochaines optimisations : AMX (noyau et processeur), pages de 2 Mo du RAM disk
+    echo "noyau : $(uname -r) ; instructions : $(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' |
+        grep -E '^(amx_.*|avx512_(vnni|bf16|fp16)|avx_vnni)$' | tr '\n' ' ')"
+    echo "RAM disk du modèle : $(findmnt -n -o OPTIONS -T "$MODEL" 2>/dev/null || echo inconnu)"
+    grep -E "^(ShmemHugePages|ShmemPmdMapped)" /proc/meminfo | tr -s ' ' | paste -sd ';' || true
     echo "threads : $THREADS ; drafter : $NOM_DRAFT ; texte long : $CONTEXTE tokens ; lots de $UBATCH tokens"
     echo "essais par passe : $ESSAIS, dont $LECTURES lectures d'un texte neuf ; réglages : ${VARS:-aucun}"
 } > "$OUT" 2>&1
