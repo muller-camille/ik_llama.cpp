@@ -46,6 +46,7 @@ MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gg
 MIRROR=${MIRROR-/mnt/ds1}
 T=${T:-$COEURS}
 CTX=${CTX:-131072}
+UBATCH=${UBATCH:-2048}   # tokens du prompt lus ensemble, comme deepseek.sh
 SPEC=${SPEC:-dspark:n_max=4}
 CLE=mesure   # clé du serveur que ce script lance pour lui seul, sur 127.0.0.1
 PORT=${PORT_MESURE:-8080}
@@ -66,6 +67,7 @@ fi
 [ -f "$MODEL" ] || { echo "Modèle introuvable : $MODEL (variable MODEL)"; exit 1; }
 
 ARGS=(-m "$MODEL" -t "$T" -c "$CTX" -cram 100000 --jinja --swa-compress
+      -b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH"
       --api-key "$CLE" --host 127.0.0.1 --port "$PORT")
 [ -z "$MIRROR" ] || ARGS+=(--numa-mirror "$MIRROR")
 [ -z "$DRAFT" ]  || ARGS+=(-md "$DRAFT" --spec-type "$SPEC")

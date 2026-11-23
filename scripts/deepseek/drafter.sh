@@ -46,6 +46,7 @@ MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gg
 MIRROR=${MIRROR-/mnt/ds1}
 T=${T:-$COEURS}
 CTX=${CTX:-131072}
+UBATCH=${UBATCH:-2048}   # tokens du prompt lus ensemble, comme deepseek.sh
 # le premier est le réglage habituel ; le drafter a été entraîné pour des blocs de 5 tokens
 REGLAGES=${REGLAGES:-"n_max=4 n_max=4,p_min=0.5 n_max=4,p_min=0.3 n_max=4,p_min=0 n_max=5,p_min=0.5 n_max=5,p_min=0.3 n_max=5,p_min=0"}
 API_KEY=mesure   # clé du serveur que ce script lance pour lui seul, sur 127.0.0.1
@@ -91,6 +92,7 @@ RESUME=()
 passe() {
     local draft=$1 reglage=$2 pret=0 v i rep texte moyenne=
     local args=(-m "$MODEL" -t "$T" -c "$CTX" -cram 100000 --jinja --swa-compress
+                -b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH"
                 --api-key "$API_KEY" --host 127.0.0.1 --port "$PORT"
                 -md "$draft" --spec-type "dspark:$reglage")
     [ -z "$MIRROR" ] || args+=(--numa-mirror "$MIRROR")
