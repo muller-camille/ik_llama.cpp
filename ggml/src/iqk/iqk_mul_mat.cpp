@@ -28,6 +28,7 @@
 #include "iqk_quantize.h"
 #include "iqk_flash_impl.h"
 #include "iqk_indexer_512.h"
+#include "iqk_amx.h"
 #include "iqk_gemm_floats.h"
 #include "iqk_gemm_kquants.h"
 #include "iqk_gemm_ktquants.h"
@@ -725,6 +726,11 @@ extern "C" IQK_API bool iqk_mul_mat(long Nx, long Ny, long ne00,
         float * C, long stride_C, int ith, int nth) {
 
     constexpr int k_min_step = 32;
+
+    // a batch of tokens whose activations came as bf16 for the tiles of AMX
+    if (typeB == GGML_TYPE_BF16 && iqk_amx_mul_mat(Nx, Ny, ne00, typeA, A, strideA, B, strideB, C, stride_C, ith, nth)) {
+        return true;
+    }
 
     MulMat mm;
 

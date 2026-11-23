@@ -286,6 +286,8 @@ jobs:
           GGML_PROFILE=1 ./llama-server -m model.gguf ... 2> server.log    # stop it with Ctrl+C, then: grep ggml_profile server.log
           \`\`\`
 
+          On a Xeon with AMX (Sapphire Rapids and later), a batch of 48 tokens or more is multiplied with the \`Q8_0_R8\` matrices through the AMX tiles, as bf16: about twice as fast for those products, which are a fifth of the reading of a prompt with DeepSeek-V4.1. \`grep amx /proc/cpuinfo\` tells whether the system gives AMX to programs; \`GGML_AMX=0\` in the environment turns it off.
+
           \`llama-server --webui llamacpp\` serves the current web UI of llama.cpp ("Llama Chat"); without the option it serves the one of ik_llama.cpp.
 
           The package also holds the shell scripts used for DeepSeek-V4.1 on a 2-socket machine; their messages are in French. They use the tools next to them, and read what is specific to the machine (\`NFS\`, \`API_KEY\`, \`HOST\`, ...) from \`~/.deepseek.conf\`, one \`NAME=value\` per line:

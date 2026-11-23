@@ -156,6 +156,10 @@ llama_test(test-indexer-topk)
 llama_test(test-indexer-topk NAME test-indexer-topk-other-way)
 set_tests_properties(test-indexer-topk-other-way PROPERTIES ENVIRONMENT "GGML_INDEXER_512=0")
 
+# the products of a batch through the tiles of AMX, where the machine has them
+llama_build(test-amx-gemm.cpp)
+llama_test(test-amx-gemm)
+
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)
 

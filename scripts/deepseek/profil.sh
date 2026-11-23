@@ -20,18 +20,20 @@
 # LECTURES premières lisent chacune un texte neuf, que le serveur ne peut pas reprendre de son cache. Le
 # résultat donne chaque essai, la moyenne et les extrêmes.
 #
-# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 28 passes, environ 2 heures, pendant
+# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 30 passes, environ 2 heures, pendant
 # lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 12 en 20 minutes. Ctrl+C arrête le
 # script et écrit le tableau des passes déjà faites.
 #
 #   RAPIDE     1 = la version courte : 2 essais par passe, une seule lecture du texte long, et les deux
-#              réglages UBATCH=512 et GGML_INDEXER_512=0
+#              réglages GGML_AMX=0 et UBATCH=512
 #   THREADS    les nombres de threads à mesurer, par défaut les cœurs physiques puis les processeurs
 #              logiques (32 et 64 sur 2 x 16 cœurs à hyperthreading) ; le premier est celui des passes 1 et 3
 #   VARS       les réglages à essayer tour à tour. Par défaut tous ceux qui se comparent :
 #              - UBATCH=512 et UBATCH=4096 lisent le prompt par lots de 512 ou de 4096 tokens au lieu de 2048 :
 #                ce n'est pas une variable du serveur mais son option -ub, la ligne « texte lu » dit ce que
 #                cela change ;
+#              - GGML_AMX=0 lit le prompt sans les tuiles AMX du processeur (Sapphire Rapids et suivants) :
+#                les produits des matrices Q8_0_R8 par un lot de tokens reprennent les noyaux AVX-512 ;
 #              - GGML_INDEXER_512=0 reprend l'ancien indexeur à la place de celui en AVX-512 ;
 #              - GGML_FA_ROW_GROUPS=-1 tire au sort la grille de threads de l'attention à chaque nœud, et le
 #                chronométrage dit ce que chacune a coûté (les tokens/s de ces passes ne se comparent donc
@@ -105,11 +107,11 @@ if [ -n "$DRAFT" ] && [ ! -f "$DRAFT" ] && [ -f "$(dirname "$MODEL")/$DRAFT" ]; 
 fi
 RAPIDE=${RAPIDE:-0}
 if [ "$RAPIDE" = 1 ]; then
-    VARS=${VARS-UBATCH=512 GGML_INDEXER_512=0}
+    VARS=${VARS-GGML_AMX=0 UBATCH=512}
     ESSAIS=${ESSAIS:-2}
     LECTURES=${LECTURES:-1}
 fi
-VARS=${VARS-UBATCH=512 UBATCH=4096 GGML_INDEXER_512=0 GGML_FA_ROW_GROUPS=-1 GGML_LAZY_CONCAT=0 GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0 GGML_HC_PROJ=0 GGML_SERIAL_NODES=0 IQK_PREFETCH=0}
+VARS=${VARS-GGML_AMX=0 UBATCH=512 UBATCH=4096 GGML_INDEXER_512=0 GGML_FA_ROW_GROUPS=-1 GGML_LAZY_CONCAT=0 GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0 GGML_HC_PROJ=0 GGML_SERIAL_NODES=0 IQK_PREFETCH=0}
 CONTEXTE=${CONTEXTE:-16000}
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}
