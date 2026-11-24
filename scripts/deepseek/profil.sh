@@ -1,5 +1,7 @@
 #!/bin/bash
-# Chronomètre les opérations du modèle sur cette machine, pour savoir où part le temps.
+# Mesure sur cette machine ce que le serveur donne selon la façon de le lancer, et chronomètre les
+# opérations du modèle. Les réglages par défaut de deepseek.sh viennent de son résultat, et c'est lui qu'il
+# faut relancer pour savoir si un autre réglage ferait mieux : rien ne se mesure ailleurs que sur le serveur.
 #
 #   ./profil.sh                      toutes les passes, avec le drafter rangé à côté du modèle
 #   ./profil.sh <fichier drafter>    les mêmes, avec ce drafter
@@ -9,28 +11,35 @@
 # choisit une autre : ./profil.sh <dossier ik_llama> [fichier drafter]
 # Autre modèle : MODEL=/mnt/ds0/...-R8Q6-00001-of-00009.gguf ./profil.sh ...
 #
-# Les passes, dans cet ordre :
-#   1. la version telle quelle, un thread par cœur physique : sans puis avec le drafter, après une question
-#      courte puis après un texte long (au-delà de 256 tokens de contexte l'attention ne suit plus le même
-#      chemin dans le code, et le texte long donne la vitesse de lecture d'un prompt) ;
-#   2. les mêmes avec les autres nombres de threads (THREADS) : un par processeur logique, soit le double
-#      sur une machine à hyperthreading ;
-#   3. un réglage changé à la fois (VARS), après le texte long, sans puis avec le drafter.
-# Chaque passe fait plusieurs essais : ESSAIS requêtes de N_PREDICT tokens, et après le texte long les
+# Ce qui est mesuré, sans puis avec le drafter :
+#   1. les nombres de threads (THREADS), après une question courte puis après un texte long (au-delà de 256
+#      tokens de contexte l'attention ne suit plus le même chemin dans le code, et le texte long donne la
+#      vitesse de lecture d'un prompt). Sur une machine à hyperthreading : un thread par cœur physique, un
+#      par processeur logique, et les deux à la fois, écrit 32/64 : les cœurs physiques quand le modèle
+#      calcule un token seul, les processeurs logiques quand il en calcule plusieurs ensemble (la lecture
+#      d'un prompt, la vérification des tokens du drafter). Dans chaque cas la première passe est celle de
+#      deepseek.sh sans réglage, la passe de référence : un thread par processeur logique avec le drafter,
+#      un par cœur physique sans, ou T (et TB) s'ils sont réglés ;
+#   2. un réglage changé à la fois (VARS), après le texte long, avec les threads de la passe de référence.
+# Chaque passe fait plusieurs essais : ESSAIS requêtes de N_PREDICT tokens, chacune sur un autre sujet (le
+# premier est celui de toutes les mesures précédentes, l'histoire de Paris), et après le texte long les
 # LECTURES premières lisent chacune un texte neuf, que le serveur ne peut pas reprendre de son cache. Le
-# résultat donne chaque essai, la moyenne et les extrêmes.
+# résultat donne chaque essai, la moyenne et les extrêmes. Plusieurs sujets, parce qu'avec le drafter la
+# vitesse tient au texte : sur un seul, deux passes qui n'écrivent pas le même ne se comparent pas.
 #
 # Avec un drafter, le résultat donne aussi pour chaque passe les pas du drafter (une proposition et sa
 # vérification par le modèle) : leur durée (ms/pas) et les tokens produits par pas (tok/pas).
 #
-# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 30 passes, environ 2 heures, pendant
-# lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 12 en 20 minutes. Ctrl+C arrête le
-# script et écrit le tableau des passes déjà faites.
+# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 34 passes, environ 2 h 30, pendant
+# lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 16 en 25 minutes. Ctrl+C arrête le
+# script et écrit le résumé des passes déjà faites.
 #
 #   RAPIDE     1 = la version courte : 2 essais par passe, une seule lecture du texte long, et les deux
 #              réglages GGML_AMX=0 et UBATCH=512
-#   THREADS    les nombres de threads à mesurer, par défaut les cœurs physiques puis les processeurs
-#              logiques (32 et 64 sur 2 x 16 cœurs à hyperthreading) ; le premier est celui des passes 1 et 3
+#   THREADS    les nombres de threads à mesurer. Par défaut les cœurs physiques, les processeurs logiques,
+#              puis les deux à la fois (32, 64 et 32/64 sur 2 x 16 cœurs à hyperthreading). a/b = a threads
+#              pour un token seul et b pour les lots de tokens (options -t et -tb du serveur)
+#   T, TB      les threads de deepseek.sh s'ils sont réglés (~/.deepseek.conf) : ceux de la passe de référence
 #   VARS       les réglages à essayer tour à tour. Par défaut tous ceux qui se comparent :
 #              - UBATCH=512 et UBATCH=4096 lisent le prompt par lots de 512 ou de 4096 tokens au lieu de 2048 :
 #                ce n'est pas une variable du serveur mais son option -ub, la ligne « texte lu » dit ce que
@@ -44,7 +53,7 @@
 #              - GGML_LAZY_CONCAT=0 recopie le cache en un bloc avant l'attention ; GGML_FA_SKIP_MASKED=0
 #                calcule l'attention sur tout le cache ; GGML_SHARE_ROWS=0, GGML_HC_PROJ=0,
 #                GGML_SERIAL_NODES=0 et IQK_PREFETCH=0 coupent chacun une optimisation de la lecture des poids
-#              (VARS="GGML_INDEXER_512=0" n'en essaie qu'un ; VARS= ne fait que les passes 1 et 2)
+#              (VARS="GGML_INDEXER_512=0" n'en essaie qu'un ; VARS= ne mesure que les nombres de threads)
 #   ESSAIS     requêtes par passe, 5 par défaut ; LECTURES, lectures d'un texte neuf parmi elles, 3 ;
 #              N_PREDICT, tokens produits par requête, 200
 #   CONTEXTE   taille du texte long en tokens, 16000 par défaut ; CONTEXTE=0 saute les passes au texte long
@@ -52,13 +61,16 @@
 #   DRAFT      le drafter : un chemin, ou un nom de fichier cherché à côté du modèle (celui de
 #              ~/.deepseek.conf) ; vide = sans drafter ; par défaut le dspark-*-R8.gguf à côté du modèle,
 #              sinon le dspark-*.gguf
-# Chaque passe note aussi le début du texte produit et son empreinte. Le texte peut différer d'une passe
-# à l'autre dès le premier token : il suffit que deux tokens soient presque à égalité et qu'un arrondi
+# Chaque passe note aussi le début du premier texte produit et son empreinte. Le texte peut différer d'une
+# passe à l'autre dès le premier token : il suffit que deux tokens soient presque à égalité et qu'un arrondi
 # change. Il doit rester un texte sensé.
 #
-# Le résultat est écrit dans profil-resultat.txt, dans le dossier où vous lancez le script, et se termine
-# par un tableau d'une ligne par passe : c'est ce fichier qu'il faut envoyer. Il ne contient ni nom de
-# machine ni nom d'utilisateur.
+# Le résultat est écrit dans profil-resultat.txt, dans le dossier où vous lancez le script : c'est ce
+# fichier qu'il faut envoyer. Il ne contient ni nom de machine ni nom d'utilisateur, et se termine par
+#   - un tableau d'une ligne par passe ;
+#   - pour chaque colonne, le nombre de threads le plus rapide et les chiffres des autres, avec le réglage
+#     de deepseek.sh qui le donne ;
+#   - ce que chaque réglage de VARS change par rapport à la passe de référence.
 set -euo pipefail
 
 # --- réglages --------------------------------------------------------------
@@ -90,11 +102,45 @@ COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 LOGIQUES=$(nproc)
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
+# voulue <drafter ou vide> : les threads de deepseek.sh dans ce cas. T (et TB) s'ils sont réglés, sinon un par
+# processeur logique avec le drafter et un par cœur physique sans, comme deepseek.sh
+voulue() {
+    local t=${T:-}
+    if [ -z "$t" ]; then
+        if [ -n "$1" ]; then t=$LOGIQUES; else t=$COEURS; fi
+    fi
+    [ -z "${TB:-}" ] || [ "$TB" = "$t" ] || t=$t/$TB
+    echo "$t"
+}
+# les nombres de threads à mesurer : a = a threads, a/b = a pour un token seul et b pour les lots de tokens
 if [ -z "${THREADS:-}" ]; then
-    THREADS=${T:-$COEURS}
-    [ "$LOGIQUES" -le "$THREADS" ] || THREADS="$THREADS $LOGIQUES"
+    THREADS=$COEURS
+    [ "$LOGIQUES" -le "$COEURS" ] || THREADS="$COEURS $LOGIQUES $COEURS/$LOGIQUES"
+    # les threads réglés pour deepseek.sh se mesurent aussi
+    for v in "$(voulue "")" "$(voulue drafter)"; do
+        case " $THREADS " in
+            *" $v "*) ;;
+            *) THREADS="$v $THREADS" ;;
+        esac
+    done
 fi
-T=${THREADS%% *}       # threads des passes principales
+# reference <drafter ou vide> : les threads de la passe de référence, ceux de deepseek.sh s'ils sont parmi
+# les nombres mesurés, sinon le premier
+reference() {
+    local v
+    v=$(voulue "$1")
+    case " $THREADS " in
+        *" $v "*) echo "$v" ;;
+        *)        echo "${THREADS%% *}" ;;
+    esac
+}
+# en_clair <threads> : « 32 threads », ou « 32 threads et 64 pour les lots de tokens »
+en_clair() {
+    case $1 in
+        */*) echo "${1%%/*} threads et ${1#*/} pour les lots de tokens" ;;
+        *)   echo "$1 threads" ;;
+    esac
+}
 # le drafter : en argument, sinon DRAFT, sinon celui qui est rangé à côté du modèle
 if [ $# -gt 0 ]; then
     DRAFT=$1
@@ -137,7 +183,7 @@ fi
 [ -z "$DRAFT" ] || [ -f "$DRAFT" ] || { echo "Drafter introuvable : $DRAFT (DRAFT= pour s'en passer)"; exit 1; }
 [ -f "$MODEL" ] || { echo "Modèle introuvable : $MODEL (variable MODEL)"; exit 1; }
 for n in $THREADS; do
-    [[ $n =~ ^[1-9][0-9]*$ ]] || { echo "THREADS=$THREADS : des nombres de threads, séparés par des espaces."; exit 1; }
+    [[ $n =~ ^[1-9][0-9]*(/[1-9][0-9]*)?$ ]] || { echo "THREADS=$THREADS : des nombres de threads séparés par des espaces, 32 ou 32/64."; exit 1; }
 done
 for n in "$ESSAIS" "$LECTURES" "$N_PREDICT"; do
     [[ $n =~ ^[1-9][0-9]*$ ]] || { echo "ESSAIS, LECTURES et N_PREDICT sont des nombres, au moins 1."; exit 1; }
@@ -153,7 +199,78 @@ arreter() {
         PID=
     fi
 }
-# à la fin, ou à l'arrêt par Ctrl+C : le serveur s'arrête et le tableau des passes faites s'écrit
+# conclure : ce que le tableau dit, pour n'avoir rien à y chercher. Les colonnes d'une ligne : 1 threads,
+# 2 drafter, 3 contexte, 4 réglage changé, 6 lecture, 7 sortie.
+conclure() {
+    printf '%s\n' "${RESUME[@]}" | awk '
+        function nombre(x) { return x ~ /^[0-9]+(\.[0-9]+)?$/ }
+        function ecart(a, b) { return sprintf("%+.1f %%", 100*(a - b)/b) }
+        # retenir : un chiffre de plus pour ce cas, et le plus haut
+        function retenir(cas, t, v) {
+            if (!nombre(v)) return
+            if (!(cas in n)) ordre[++nc] = cas
+            n[cas]++
+            threads[cas, n[cas]] = t
+            chiffre[cas, n[cas]] = v
+            if (n[cas] == 1 || v + 0 > haut[cas] + 0) { haut[cas] = v; qui[cas] = t }
+        }
+        { ligne[NR] = $0 }
+        $4 == "-" {
+            mode = ($2 == "oui" ? "avec le drafter" : "sans drafter")
+            if ($3 == "court") {
+                retenir(mode ", question courte, tokens/s produits", $1, $7)
+            } else {
+                retenir(mode ", texte long, tokens/s lus", $1, $6)
+                retenir(mode ", après le texte long, tokens/s produits", $1, $7)
+            }
+            ref_lecture[$1, $2, $3] = $6
+            ref_sortie[$1, $2, $3] = $7
+        }
+        END {
+            titre = 0
+            for (i = 1; i <= nc; i++) {
+                cas = ordre[i]
+                if (n[cas] < 2) continue
+                if (!titre) {
+                    print ""
+                    print "=== le plus rapide des nombres de threads, colonne par colonne (passes sans réglage changé)"
+                    titre = 1
+                }
+                autres = ""
+                for (j = 1; j <= n[cas]; j++) {
+                    if (threads[cas, j] == qui[cas]) continue
+                    autres = autres (autres == "" ? "" : ", ") chiffre[cas, j] " avec " threads[cas, j]
+                }
+                printf "%s : %s avec %s threads (%s)\n", cas, haut[cas], qui[cas], autres
+            }
+            if (titre) {
+                print "a/b : a threads pour un token seul, b pour les lots de tokens."
+                print "Pour que deepseek.sh prenne un de ces nombres : T=a dans ~/.deepseek.conf, et TB=b pour a/b."
+            }
+            titre = 0
+            for (i = 1; i <= NR; i++) {
+                split(ligne[i], f, " ")
+                if (f[4] == "-") continue
+                cle = f[1] SUBSEP f[2] SUBSEP f[3]
+                if (!(cle in ref_sortie)) continue
+                lecture = (nombre(f[6]) && nombre(ref_lecture[cle]))
+                sortie = (nombre(f[7]) && nombre(ref_sortie[cle]))
+                if (!lecture && !sortie) continue
+                if (!titre) {
+                    print ""
+                    print "=== un réglage changé à la fois, à côté de la passe de référence (mêmes threads, même contexte)"
+                    titre = 1
+                }
+                printf "%s, %s :", f[4], (f[2] == "oui" ? "avec le drafter" : "sans drafter")
+                if (lecture) printf " lu à %s au lieu de %s (%s)", f[6], ref_lecture[cle], ecart(f[6], ref_lecture[cle])
+                if (lecture && sortie) printf " ;"
+                if (sortie) printf " produit à %s au lieu de %s (%s)", f[7], ref_sortie[cle], ecart(f[7], ref_sortie[cle])
+                printf "\n"
+            }
+        }'
+}
+
+# à la fin, ou à l'arrêt par Ctrl+C : le serveur s'arrête et le résumé des passes faites s'écrit
 RESUME=()
 finir() {
     arreter
@@ -164,9 +281,10 @@ finir() {
         echo "lus : tokens du texte long ; lecture : tokens/s lus, moyenne des lectures ; sortie : tokens/s produits,"
         echo "moyenne, plus bas et plus haut des essais ; draft : part acceptée des tokens du drafter sur la passe ;"
         echo "ms/pas : durée d'un pas du drafter (sa proposition et la vérification) ; tok/pas : tokens produits par pas."
-        echo "Avec le drafter, sortie = 1000 x tok/pas / ms/pas."
+        echo "Avec le drafter, sortie = 1000 x tok/pas / ms/pas. threads a/b : a pour un token seul, b pour les lots."
         printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s\n' threads drafter contexte variante lus lecture sortie min max draft ms/pas tok/pas
         printf '%s\n' "${RESUME[@]}"
+        conclure
     } | tee -a "$OUT"
     RESUME=()
 }
@@ -176,7 +294,7 @@ trap 'echo ""; echo "== Arrêt demandé."; exit 130' INT TERM
 # dire <texte> : à l'écran et dans le fichier de résultat
 dire() { echo "$@" | tee -a "$OUT"; }
 
-# les passes : d'abord le nombre de threads principal, puis les réglages, puis les autres nombres de threads
+# les passes : la référence de chaque cas, puis les autres nombres de threads, puis les réglages
 DRAFTERS=("")
 NOM_DRAFT=aucun
 if [ -n "$DRAFT" ]; then
@@ -212,11 +330,19 @@ fi
     echo "RAM disk du modèle : $(findmnt -n -o OPTIONS -T "$MODEL" 2>/dev/null || echo inconnu)"
     grep -E "^(ShmemHugePages|ShmemPmdMapped)" /proc/meminfo | tr -s ' ' | paste -sd ';' || true
     echo "threads : $THREADS ; drafter : $NOM_DRAFT ; texte long : $CONTEXTE tokens ; lots de $UBATCH tokens"
+    echo "passes de référence : $(reference "") threads sans drafter$([ -z "$DRAFT" ] || echo ", $(reference "$DRAFT") avec")"
     echo "essais par passe : $ESSAIS, dont $LECTURES lectures d'un texte neuf ; réglages : ${VARS:-aucun}"
 } > "$OUT" 2>&1
 echo "== Résultat dans $OUT"
 echo "== $N_PASSES passes, environ $DUREE : threads $THREADS, drafter $NOM_DRAFT, $ESSAIS essais par passe"
-[ "$RAPIDE" = 1 ] || [ "$S_TOTAL" -lt 2400 ] || echo "   (RAPIDE=1 : la version courte ; Ctrl+C écrit le tableau des passes faites)"
+[ "$RAPIDE" = 1 ] || [ "$S_TOTAL" -lt 2400 ] || echo "   (RAPIDE=1 : la version courte ; Ctrl+C écrit le résumé des passes faites)"
+
+# les sujets des essais, la question et le titre : l'essai i prend le sujet i, puis on recommence au premier.
+# Le premier est celui de toutes les mesures faites jusqu'à rhel8-b5374.
+SUJETS=("the history of Paris" "how a steam engine works" "the life of a honey bee" "the rules of chess"
+        "the making of bread" "the water cycle" "the building of a cathedral" "the travels of Marco Polo")
+TITRES=("The History of Paris" "How a Steam Engine Works" "The Life of a Honey Bee" "The Rules of Chess"
+        "The Making of Bread" "The Water Cycle" "The Building of a Cathedral" "The Travels of Marco Polo")
 
 # remplir <tokens> : un texte d'à peu près cette longueur, en paragraphes numérotés (85 tokens environ chacun),
 # déjà échappé pour JSON
@@ -242,14 +368,18 @@ stats() {
 }
 
 N_PASSE=0
-# passe <threads> <drafter ou vide> <tokens de texte avant la question, ou 0> [VARIABLE=valeur]
+# passe <threads, a ou a/b> <drafter ou vide> <tokens de texte avant la question, ou 0> [VARIABLE=valeur]
 passe() {
     local t=$1 draft=$2 contexte=$3 var=${4:-} pret=0 v i rep texte invite
     local lu="-" lecture="-" moyenne="-" accepte="-" ms_pas="-" tok_pas="-"
-    local pn pm stat pas gen acc dur tok_total=0 ms_total=0
+    local s pn pm stat pas gen acc dur tok_total=0 ms_total=0
     N_PASSE=$((N_PASSE + 1))
-    local args=(-m "$MODEL" -t "$t" -c "$CTX" -cram 100000 --jinja --swa-compress
+    local args=(-m "$MODEL" -t "${t%%/*}" -c "$CTX" -cram 100000 --jinja --swa-compress
                 --api-key "$API_KEY" --host 127.0.0.1 --port "$PORT")
+    # a/b : b threads pour les lots de plusieurs tokens
+    case $t in
+        */*) args+=(-tb "${t#*/}") ;;
+    esac
     [ -z "$MIRROR" ] || args+=(--numa-mirror "$MIRROR")
     [ -z "$draft" ]  || args+=(-md "$draft" --spec-type "$SPEC")
     # la taille des lots du prompt, une option du serveur : celle de UBATCH, ou d'un UBATCH=<n> parmi les réglages
@@ -262,9 +392,9 @@ passe() {
     dire ""
     echo "== passe $N_PASSE sur $N_PASSES"
     if [ "$contexte" -gt 0 ]; then
-        dire "=== $t threads, drafter : $([ -n "$draft" ] && echo "$NOM_DRAFT" || echo aucun), contexte long${var:+, $var}"
+        dire "=== $(en_clair "$t"), drafter : $([ -n "$draft" ] && echo "$NOM_DRAFT" || echo aucun), contexte long${var:+, $var}"
     else
-        dire "=== $t threads, drafter : $([ -n "$draft" ] && echo "$NOM_DRAFT" || echo aucun)${var:+, $var}"
+        dire "=== $(en_clair "$t"), drafter : $([ -n "$draft" ] && echo "$NOM_DRAFT" || echo aucun)${var:+, $var}"
     fi
     ( cd "$IK_DIR" && exec env GGML_PROFILE=1 $var numactl --interleave=all ./llama-server "${args[@]}" > "$LOG" 2>&1 ) &
     PID=$!
@@ -297,15 +427,16 @@ passe() {
         # après le texte long, les LECTURES premiers essais lisent chacun un texte neuf : sa première ligne
         # change, le serveur ne retrouve donc rien dans son cache. Les essais suivants reprennent le dernier.
         k=$(( i < LECTURES ? i : LECTURES ))
+        s=$(( (i - 1) % ${#SUJETS[@]} ))
         {
             printf '{"prompt":"'
             if [ "$contexte" -gt 0 ]; then
                 printf 'Volume %d.\\n\\n' "$k"
                 remplir "$contexte"
             fi
-            printf 'Write a long essay about the history of Paris.\\n\\n'
+            printf 'Write a long essay about %s.\\n\\n' "${SUJETS[$s]}"
             # after a long text, the title of the essay: without it the model goes on with the text
-            [ "$contexte" -le 0 ] || printf '# The History of Paris\\n\\n'
+            [ "$contexte" -le 0 ] || printf '# %s\\n\\n' "${TITRES[$s]}"
             printf '","n_predict":%d,"temperature":0,"cache_prompt":true}' "$N_PREDICT"
         } > "$invite"
         rep=$(curl -s "http://127.0.0.1:$PORT/completion" -H "Content-Type: application/json" -H "Authorization: Bearer $API_KEY" \
@@ -332,11 +463,11 @@ passe() {
         if [ -z "$v" ]; then
             dire "essai $i : pas de réponse"
         else
-            dire "essai $i : $(printf '%.2f' "$v") tokens/s"
+            dire "essai $i : $(printf '%.2f' "$v") tokens/s (${SUJETS[$s]})"
             valeurs+=("$v")
         fi
         if [ "$i" = 1 ]; then
-            # le texte produit : le même d'une passe à l'autre si le calcul est le même
+            # le premier texte produit : le même d'une passe à l'autre si le calcul est le même
             texte=$(echo "$rep" | grep -o '"content":"\(\\.\|[^"\\]\)*"' | head -1 | cut -c12- | sed 's/"$//' || true)
             dire "texte : $(echo "$texte" | cut -c1-150)"
             dire "empreinte du texte : $(echo "$texte" | md5sum | cut -c1-12)"
@@ -388,16 +519,16 @@ passe() {
 }
 
 # une passe qui échoue n'empêche pas les suivantes
-# 1. la version telle quelle, au nombre de threads principal
+# 1. la passe de référence de chaque cas : ce que deepseek.sh lance
 for draft in "${DRAFTERS[@]}"; do
     for contexte in $CONTEXTES; do
-        passe "$T" "$draft" "$contexte" || true
+        passe "$(reference "$draft")" "$draft" "$contexte" || true
     done
 done
 # 2. les autres nombres de threads
-for t in ${THREADS#* }; do
-    [ "$t" != "$T" ] || continue
+for t in $THREADS; do
     for draft in "${DRAFTERS[@]}"; do
+        [ "$t" != "$(reference "$draft")" ] || continue
         for contexte in $CONTEXTES; do
             passe "$t" "$draft" "$contexte" || true
         done
@@ -406,7 +537,7 @@ done
 # 3. un réglage changé à la fois, après le texte long (la question courte si CONTEXTE=0)
 for var in $VARS; do
     for draft in "${DRAFTERS[@]}"; do
-        passe "$T" "$draft" "${CONTEXTES##* }" "$var" || true
+        passe "$(reference "$draft")" "$draft" "${CONTEXTES##* }" "$var" || true
     done
 done
 
