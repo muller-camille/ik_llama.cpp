@@ -7,7 +7,8 @@
 # Le script mesure la version dans laquelle il se trouve. Un dossier ik_llama en premier argument en
 # choisit une autre : ./mesure.sh <dossier ik_llama> [fichier drafter]
 #
-# Réglages par variables : T (threads, un par cœur physique par défaut), MODEL (premier fichier du modèle),
+# Réglages par variables : T (threads, comme deepseek.sh : un par processeur logique avec le drafter, un par
+# cœur physique sans), MODEL (premier fichier du modèle),
 # MIRROR (copie des poids pour l'autre socket, vide = aucune), SPEC (réglage du drafter), CONTEXTE (nombre
 # de tokens d'un texte placé avant la question, 0 par défaut : la vitesse avec un long contexte n'est pas
 # celle d'une question courte).
@@ -38,13 +39,15 @@ fi
 if [ "$(cd "$IK_DIR" 2>/dev/null && pwd -P)" != "$(cd "$ICI" && pwd -P)" ]; then
     echo "== ATTENTION : les outils utilisés sont ceux de $IK_DIR, pas ceux du dossier de ce script ($ICI)"
 fi
-# un thread par cœur physique
+# les threads de deepseek.sh : un par processeur logique avec le drafter, un par cœur physique sans
 COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 [ "$COEURS" -gt 0 ] 2>/dev/null || COEURS=$(nproc)
 DRAFT=${1:-}
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
-T=${T:-$COEURS}
+if [ -z "${T:-}" ]; then
+    if [ -n "$DRAFT" ]; then T=$(nproc); else T=$COEURS; fi
+fi
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}   # tokens du prompt lus ensemble, comme deepseek.sh
 SPEC=${SPEC:-dspark:n_max=4}

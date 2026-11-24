@@ -16,6 +16,7 @@
 #include "iqk/iqk_cpu_ops.h"
 #if GGML_USE_IQK_MULMAT
 #include "iqk/iqk_mul_mat.h"
+#include "iqk/iqk_amx.h"
 #include "iqk/iqk_config.h"
 #endif
 
@@ -6336,6 +6337,8 @@ static inline enum ggml_type ggml_mul_mat_vec_dot_type(const struct ggml_tensor 
 #else
     const int min_col = op == GGML_OP_MUL_MAT ? 8 : 64;
 #endif
+    // a batch of tokens through the tiles of AMX: the activations as bf16, see iqk/iqk_amx.h
+    if (op == GGML_OP_MUL_MAT && iqk_amx_wanted(a->type, a->ne[1], n_col, a->ne[0])) return GGML_TYPE_BF16;
     if ((a->type == GGML_TYPE_F8_E4M3_KS || a->type == GGML_TYPE_F8_E4M3_B128) && a->ne[0] % QK8_0 == 0) {
         if (ggml_get_input_scale(a) != 0.0f && n_col >= min_col) return type_traits[GGML_TYPE_Q8_0].vec_dot_type;
 #if defined(__ARM_FEATURE_BF16)
@@ -19302,11 +19305,21 @@ static inline uint32_t simple_gcd(uint32_t a, uint32_t b) {
 // the MUL_MAT node after node_n takes the same quantized src1: ggml_compute_forward_mul_mat computes it too
 static inline bool ggml_mul_mat_goes_with(const struct ggml_cgraph * cgraph, int node_n,
         const struct ggml_tensor * src1, enum ggml_type vec_dot_type) {
-    return node_n < cgraph->n_nodes - 1 &&
-           cgraph->nodes[node_n+1]->op == GGML_OP_MUL_MAT &&
-           cgraph->nodes[node_n+1]->src[1] == src1 &&
-           cgraph->nodes[node_n+1]->src[0]->type != GGML_TYPE_F8_E4M3_KS &&
-           type_traits[cgraph->nodes[node_n+1]->src[0]->type].vec_dot_type == vec_dot_type;
+    if (node_n >= cgraph->n_nodes - 1 ||
+        cgraph->nodes[node_n+1]->op != GGML_OP_MUL_MAT ||
+        cgraph->nodes[node_n+1]->src[1] != src1 ||
+        cgraph->nodes[node_n+1]->src[0]->type == GGML_TYPE_F8_E4M3_KS) {
+        return false;
+    }
+    // the next matrix takes the activations as they were prepared for this one: bf16 if it goes through the tiles
+    // of AMX, else what the kernels of its type read
+    const struct ggml_tensor * w = cgraph->nodes[node_n+1]->src[0];
+#if GGML_USE_IQK_MULMAT
+    if (iqk_amx_wanted(w->type, w->ne[1], src1->ne[1], w->ne[0])) {
+        return vec_dot_type == GGML_TYPE_BF16;
+    }
+#endif
+    return type_traits[w->type].vec_dot_type == vec_dot_type;
 }
 
 // Matrix products whose rows the threads take from each other. The weights come from the memory at the same
@@ -19425,8 +19438,17 @@ static int ggml_compute_forward_mul_mat(
     // the matrices whose rows the threads take from each other, see ggml_mul_mat_share_init
     uint32_t share_mask = 0;
 
+    // The activations in the form the kernels read. As bf16 for the tiles of AMX, each row starts a cache line:
+    // a tile is loaded 64 bytes of 16 tokens at a time, and a third slower when each of them spans two lines.
+#if GGML_USE_IQK_MULMAT
+    const bool tiles = vec_dot_type == GGML_TYPE_BF16 && iqk_amx_wanted(type, ne01, ne11, ne00);
+#else
+    const bool tiles = false;
+#endif
+    char * const wdata_q = tiles ? (char *)(((uintptr_t)params->wdata + 63) & ~(uintptr_t)63) : (char *)params->wdata;
+
     if (src1->type != vec_dot_type) {
-        char * wdata = params->wdata;
+        char * wdata = wdata_q;
 
 #if IK_PRINT_TIMING
         int64_t t1 = ggml_time_us();
@@ -19447,7 +19469,8 @@ static int ggml_compute_forward_mul_mat(
                 GGML_ASSERT(params->wsize >= ne13*nbw3 + nth*ne10*sizeof(float));
             }
             iqk_quantize_any(src1->type, vec_dot_type, ne10, ne11, ne12, ne13, nb10, nb11, nb12, nb13,
-                    src1->data, wdata, work_buffer, type_traits[src1->type].to_float, from_float, ith, nth);
+                    src1->data, wdata, work_buffer, type_traits[src1->type].to_float,
+                    tiles ? (ggml_from_float_t)iqk_amx_from_float : from_float, ith, nth);
         }
 #endif
         if (!done) {
@@ -19487,7 +19510,7 @@ static int ggml_compute_forward_mul_mat(
 
     }
 
-    const void * wdata    = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+    const void * wdata    = (src1->type == vec_dot_type) ? src1->data : wdata_q;
 
     if (src1->type != vec_dot_type && dst->type == GGML_TYPE_F32) {
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
@@ -31110,6 +31133,9 @@ struct ggml_cplan ggml_graph_plan(const struct ggml_cgraph * cgraph, int n_threa
 
                     if (node->src[1]->type != vec_dot_type) {
                         cur = ggml_row_size(vec_dot_type, node->src[1]->ne[0]) * ggml_nrows(node->src[1]);
+                        if (vec_dot_type == GGML_TYPE_BF16) {
+                            cur += 64; // the rows start on a cache line, see ggml_compute_forward_mul_mat
+                        }
                         if (node->src[1]->type != GGML_TYPE_F32) {
                             cur += n_tasks*node->src[1]->ne[0]*sizeof(float); // src1->type -> f32 -> vec_dot_type
                         }

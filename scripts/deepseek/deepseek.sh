@@ -13,7 +13,14 @@
 #   DRAFT    fichier du drafter dans NFS, vide = sans drafter ; par défaut dspark-...-Q8_0-R8.gguf s'il y
 #            est (le drafter converti, lu plus vite), sinon dspark-...-Q8_0.gguf
 #   SPEC     réglage du drafter, dspark:n_max=4 par défaut
-#   T        threads, un par cœur physique par défaut
+#   T        threads. Par défaut un par processeur logique avec le drafter, un par cœur physique sans : c'est
+#            ce que profil.sh a mesuré de plus rapide sur 2 x 16 cœurs à hyperthreading (rhel8-b5371). Avec le
+#            drafter, 33,4 tokens/s à 64 threads contre 30,9 à 32, et le prompt lu à 339 tokens/s contre 326 ;
+#            sans drafter, 23,0 à 32 threads contre 21,7 à 64. Un seul cas a donné l'inverse : le drafter
+#            après un prompt de 12 600 tokens, 26,4 à 32 threads contre 23,4 à 64 (T=32 pour ce cas-là).
+#            profil.sh refait ces mesures sur votre machine et dit le plus rapide colonne par colonne.
+#   TB       threads quand le modèle calcule plusieurs tokens ensemble (lecture d'un prompt, vérification
+#            des tokens du drafter), option -tb du serveur ; T par défaut
 #   CTX      contexte, 131072 par défaut
 #   UBATCH   tokens du prompt lus ensemble (option -ub du serveur), 2048 par défaut. Avec --swa-compress, les
 #            19 dernières couches de DeepSeek-V4.1 ne sont calculées que sur les 256 derniers tokens de chaque
@@ -50,9 +57,10 @@ fi
 if [ "$(cd "$IK_DIR" 2>/dev/null && pwd -P)" != "$(cd "$ICI" && pwd -P)" ]; then
     echo "== ATTENTION : les outils utilisés sont ceux de $IK_DIR, pas ceux du dossier de ce script ($ICI)"
 fi
-# un thread par cœur physique
+# les cœurs physiques et les processeurs logiques (le double avec l'hyperthreading)
 COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 [ "$COEURS" -gt 0 ] 2>/dev/null || COEURS=$(nproc)
+LOGIQUES=$(nproc)
 NFS=${NFS:?"Indiquez le dossier des fichiers convertis : NFS=... dans ~/.deepseek.conf ou devant la commande"}
 P=${P:-DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8}
 M=${M:-$P}
@@ -65,7 +73,11 @@ SPEC=${SPEC:-dspark:n_max=4}
 API_KEY=${API_KEY:-}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8080}
-T=${T:-$COEURS}
+# les threads, d'après les mesures : un par processeur logique avec le drafter, un par cœur physique sans
+if [ -z "${T:-}" ]; then
+    if [ -n "$DRAFT" ]; then T=$LOGIQUES; else T=$COEURS; fi
+fi
+TB=${TB:-}
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}
 WEBUI=${WEBUI:-llamacpp}
@@ -120,9 +132,10 @@ fi
 # --- serveur ---------------------------------------------------------------
 ARGS=(-m "/mnt/ds0/$M-00001-of-00009.gguf" --numa-mirror /mnt/ds1
       -t "$T" -c "$CTX" -cram 100000 --jinja --swa-compress --host "$HOST" --port "$PORT" --webui "$WEBUI")
+[ -z "$TB" ]      || ARGS+=(-tb "$TB")
 [ -z "$API_KEY" ] || ARGS+=(--api-key "$API_KEY")
 [ -z "$DRAFT" ]   || ARGS+=(-md "/mnt/ds0/$DRAFT" --spec-type "$SPEC")
 ARGS+=(-b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH")
-echo "== Démarrage du serveur sur $HOST:$PORT, $T threads, modèle $M (Ctrl+C pour l'arrêter)"
+echo "== Démarrage du serveur sur $HOST:$PORT, $T threads${TB:+ ($TB pour les lots de tokens)}, modèle $M (Ctrl+C pour l'arrêter)"
 cd "$IK_DIR"
 exec numactl --interleave=all ./llama-server "${ARGS[@]}"
