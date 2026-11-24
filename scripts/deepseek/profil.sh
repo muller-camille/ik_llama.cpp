@@ -20,6 +20,9 @@
 # LECTURES premières lisent chacune un texte neuf, que le serveur ne peut pas reprendre de son cache. Le
 # résultat donne chaque essai, la moyenne et les extrêmes.
 #
+# Avec un drafter, le résultat donne aussi pour chaque passe les pas du drafter (une proposition et sa
+# vérification par le modèle) : leur durée (ms/pas) et les tokens produits par pas (tok/pas).
+#
 # Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 30 passes, environ 2 heures, pendant
 # lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 12 en 20 minutes. Ctrl+C arrête le
 # script et écrit le tableau des passes déjà faites.
@@ -159,8 +162,10 @@ finir() {
         echo ""
         echo "=== résumé, une ligne par passe"
         echo "lus : tokens du texte long ; lecture : tokens/s lus, moyenne des lectures ; sortie : tokens/s produits,"
-        echo "moyenne, plus bas et plus haut des essais ; draft : part acceptée des tokens du drafter"
-        printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s\n' threads drafter contexte variante lus lecture sortie min max draft
+        echo "moyenne, plus bas et plus haut des essais ; draft : part acceptée des tokens du drafter sur la passe ;"
+        echo "ms/pas : durée d'un pas du drafter (sa proposition et la vérification) ; tok/pas : tokens produits par pas."
+        echo "Avec le drafter, sortie = 1000 x tok/pas / ms/pas."
+        printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s\n' threads drafter contexte variante lus lecture sortie min max draft ms/pas tok/pas
         printf '%s\n' "${RESUME[@]}"
     } | tee -a "$OUT"
     RESUME=()
@@ -223,11 +228,11 @@ remplir() {
     done
 }
 
-# resumer <threads> <drafter ou vide> <contexte> <réglage> <tokens lus> <lecture> <sortie> <min> <max> <acceptés> :
-# la ligne de la passe dans le tableau final
+# resumer <threads> <drafter ou vide> <contexte> <réglage> <tokens lus> <lecture> <sortie> <min> <max> <acceptés>
+# <ms par pas> <tokens par pas> : la ligne de la passe dans le tableau final
 resumer() {
-    RESUME+=("$(printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s' "$1" "$([ -n "$2" ] && echo oui || echo non)" \
-        "$([ "$3" -gt 0 ] && echo long || echo court)" "${4:--}" "$5" "$6" "$7" "$8" "$9" "${10}")")
+    RESUME+=("$(printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s' "$1" "$([ -n "$2" ] && echo oui || echo non)" \
+        "$([ "$3" -gt 0 ] && echo long || echo court)" "${4:--}" "$5" "$6" "$7" "$8" "$9" "${10}" "${11:--}" "${12:--}")")
 }
 
 # stats <valeurs> : moyenne, plus bas, plus haut, nombre
@@ -240,7 +245,8 @@ N_PASSE=0
 # passe <threads> <drafter ou vide> <tokens de texte avant la question, ou 0> [VARIABLE=valeur]
 passe() {
     local t=$1 draft=$2 contexte=$3 var=${4:-} pret=0 v i rep texte invite
-    local lu="-" lecture="-" moyenne="-" accepte="-"
+    local lu="-" lecture="-" moyenne="-" accepte="-" ms_pas="-" tok_pas="-"
+    local pn pm stat pas gen acc dur tok_total=0 ms_total=0
     N_PASSE=$((N_PASSE + 1))
     local args=(-m "$MODEL" -t "$t" -c "$CTX" -cram 100000 --jinja --swa-compress
                 --api-key "$API_KEY" --host 127.0.0.1 --port "$PORT")
@@ -305,6 +311,13 @@ passe() {
         rep=$(curl -s "http://127.0.0.1:$PORT/completion" -H "Content-Type: application/json" -H "Authorization: Bearer $API_KEY" \
                 -d @"$invite" || true)
         v=$(echo "$rep" | grep -o '"predicted_per_second":[0-9.]*' | cut -d: -f2 || true)
+        # pour la durée d'un pas du drafter : les tokens produits et le temps passé à les produire, sur la passe
+        pn=$(echo "$rep" | grep -o '"predicted_n":[0-9]*' | head -1 | cut -d: -f2 || true)
+        pm=$(echo "$rep" | grep -o '"predicted_ms":[0-9.]*' | head -1 | cut -d: -f2 || true)
+        if [ -n "$pn" ] && [ -n "$pm" ]; then
+            tok_total=$((tok_total + pn))
+            ms_total=$(awk -v a="$ms_total" -v b="$pm" 'BEGIN { printf "%.3f", a + b }')
+        fi
         if [ "$contexte" -gt 0 ] && [ "$i" -le "$LECTURES" ]; then
             lu=$(echo "$rep" | grep -o '"prompt_n":[0-9]*' | head -1 | cut -d: -f2 || true)
             l=$(echo "$rep" | grep -o '"prompt_per_second":[0-9.]*' | head -1 | cut -d: -f2 || true)
@@ -343,12 +356,28 @@ passe() {
     fi
 
     arreter   # le tableau est écrit à l'arrêt du serveur
-    grep -E "draft acceptance rate|statistics dspark" "$LOG" | tail -2 >> "$OUT" || true
+    grep -E "draft acceptance rate|statistics ${SPEC%%:*}:" "$LOG" | tail -2 >> "$OUT" || true
     if [ -n "$draft" ]; then
         accepte=$(grep -o "draft acceptance rate = [0-9.]*" "$LOG" | tail -1 | awk '{ printf "%.0f%%", 100*$NF }' || true)
         accepte=${accepte:--}
+        # Sur toute la passe : les pas du drafter, ce qu'ils durent et ce qu'ils donnent. Les tokens/s en sont le
+        # quotient ; la durée d'un pas tient au réglage, les tokens par pas à ce que le modèle accepte du texte.
+        stat=$(grep "statistics ${SPEC%%:*}:" "$LOG" | tail -1 || true)
+        pas=$(echo "$stat" | grep -o '#gen drafts = [0-9]*' | grep -o '[0-9]*$' || true)
+        gen=$(echo "$stat" | grep -o '#gen tokens = [0-9]*' | grep -o '[0-9]*$' || true)
+        acc=$(echo "$stat" | grep -o '#acc tokens = [0-9]*' | grep -o '[0-9]*$' || true)
+        # dur(b,g,a) : le deuxième temps est celui que le drafter a mis à proposer
+        dur=$(echo "$stat" | sed -n 's/.*dur(b,g,a) = [0-9.]*, \([0-9.]*\),.*/\1/p')
+        if [ "${pas:-0}" -gt 0 ] && [ "$tok_total" -gt 0 ]; then
+            ms_pas=$(awk -v m="$ms_total" -v p="$pas" 'BEGIN { printf "%.1f", m/p }')
+            tok_pas=$(awk -v n="$tok_total" -v p="$pas" 'BEGIN { printf "%.2f", n/p }')
+            [ "${gen:-0}" -le 0 ] || accepte=$(awk -v a="${acc:-0}" -v g="$gen" 'BEGIN { printf "%.0f%%", 100*a/g }')
+            dire "drafter : $pas pas de $ms_pas ms$(awk -v d="${dur:-0}" -v p="$pas" 'BEGIN { if (d > 0) printf " dont %.1f pour proposer", d/p }') ;" \
+                 "par pas $(awk -v g="${gen:-0}" -v a="${acc:-0}" -v p="$pas" 'BEGIN { printf "%.2f tokens proposés, %.2f acceptés", g/p, a/p }')" \
+                 "($accepte), $tok_pas produits"
+        fi
     fi
-    resumer "$t" "$draft" "$contexte" "$var" "$lu" "$lecture" "$moyenne" "$mini" "$maxi" "$accepte"
+    resumer "$t" "$draft" "$contexte" "$var" "$lu" "$lecture" "$moyenne" "$mini" "$maxi" "$accepte" "$ms_pas" "$tok_pas"
     if grep -q "^ggml_profile:" "$LOG"; then
         grep "^ggml_profile:" "$LOG" >> "$OUT"
         echo "   chronométrage enregistré"

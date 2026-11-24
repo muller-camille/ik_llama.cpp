@@ -30,7 +30,7 @@ RELEASES = [
     ("b5353",  22.1, None, None),
     ("b5357",  22.9, None, None),
     ("b5361",  22.2, None, None),
-    ("b5371",  23.0, 30.9, None),
+    ("b5371",  23.0, 33.4, None),
 ]
 
 TITLE    = "Generation speed, release by release"

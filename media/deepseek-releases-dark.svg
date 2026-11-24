@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 452" width="920" height="452" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Generation speed, release by release</title>
-<desc id="d">Line chart. Without a draft: 9.7 tokens per second before --numa-mirror, 18.4 with b5294, 23 with b5371. With the DSpark draft: 25.6 with b5294, 30.9 with b5371. The table under the chart has every figure.</desc>
+<desc id="d">Line chart. Without a draft: 9.7 tokens per second before --numa-mirror, 18.4 with b5294, 23 with b5371. With the DSpark draft: 25.6 with b5294, 33.4 with b5371. The table under the chart has every figure.</desc>
 <rect x="0.5" y="0.5" width="919" height="451" rx="8" fill="#1a1a19" stroke="#2c2c2a"/>
 <text x="24" y="32" font-size="16" font-weight="600" fill="#f0efec">Generation speed, release by release</text>
 <text x="24" y="52" font-size="12" fill="#c3c2b7">Tokens per second, DeepSeek-V4.1-Flash UD-Q4_K_XL on 2 x 16 cores, 200 tokens after a short prompt</text>
@@ -55,7 +55,7 @@
 <circle cx="641.7" cy="200.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"><title>b5357, without a draft: 22.9 tokens/s</title></circle>
 <circle cx="699.8" cy="206.4" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"><title>b5361, without a draft: 22.2 tokens/s</title></circle>
 <circle cx="758.0" cy="200.0" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"><title>b5371, without a draft: 23 tokens/s</title></circle>
-<polyline fill="none" stroke="#d95926" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="118.2,179.2 176.3,193.6 234.5,176.0 292.7,176.8 350.8,141.6 409.0,135.2 467.2,136.8 525.3,132.0 758.0,136.8"/>
+<polyline fill="none" stroke="#d95926" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="118.2,179.2 176.3,193.6 234.5,176.0 292.7,176.8 350.8,141.6 409.0,135.2 467.2,136.8 525.3,132.0 758.0,116.8"/>
 <circle cx="118.2" cy="179.2" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5294, with the dspark draft (n_max=4): 25.6 tokens/s</title></circle>
 <circle cx="176.3" cy="193.6" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5297, with the dspark draft (n_max=4): 23.8 tokens/s</title></circle>
 <circle cx="234.5" cy="176.0" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5301, with the dspark draft (n_max=4): 26 tokens/s</title></circle>
@@ -64,8 +64,8 @@
 <circle cx="409.0" cy="135.2" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5340, with the dspark draft (n_max=4): 31.1 tokens/s</title></circle>
 <circle cx="467.2" cy="136.8" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5342, with the dspark draft (n_max=4): 30.9 tokens/s</title></circle>
 <circle cx="525.3" cy="132.0" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5345, with the dspark draft (n_max=4): 31.5 tokens/s</title></circle>
-<circle cx="758.0" cy="136.8" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5371, with the dspark draft (n_max=4): 30.9 tokens/s</title></circle>
-<text x="745.0" y="125.8" font-size="12" fill="#c3c2b7"><tspan font-weight="600" fill="#f0efec">30.9</tspan><tspan dx="7">with the draft</tspan></text>
+<circle cx="758.0" cy="116.8" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"><title>b5371, with the dspark draft (n_max=4): 33.4 tokens/s</title></circle>
+<text x="745.0" y="105.8" font-size="12" fill="#c3c2b7"><tspan font-weight="600" fill="#f0efec">33.4</tspan><tspan dx="7">with the draft</tspan></text>
 <text x="118.2" y="168.2" font-size="12" font-weight="600" text-anchor="middle" fill="#f0efec">25.6</text>
 <text x="768.0" y="204.0" font-size="12" fill="#c3c2b7"><tspan font-weight="600" fill="#f0efec">23</tspan><tspan dx="7">without a draft</tspan></text>
 <text x="24" y="436" font-size="11" fill="#898781">Best thread count measured for each release. Means of 5 runs; one run for b5353, b5357 and b5361, single requests for b5294 and before.</text>
