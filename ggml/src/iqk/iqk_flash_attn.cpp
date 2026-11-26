@@ -462,6 +462,8 @@ struct fa_listed {
 
 // what a thread needs to gather the rows of one list: K and V, and a mask
 inline int fa_listed_rows_cap(int n_idx) { return 32*((n_idx + 31)/32); }
+// the same for the lists that are not gathered by the threads of a grid: the rows a thread makes room for
+inline int fa_gather_rows(int64_t n_idx) { return fa_listed_rows_cap(int(n_idx)); }
 inline size_t fa_listed_gather_size(int n_idx, size_t row_size_k, size_t row_size_v) {
     return size_t(fa_listed_rows_cap(n_idx))*(row_size_k + row_size_v + sizeof(uint16_t)) + 64;
 }
@@ -725,7 +727,7 @@ static size_t iqk_fa_work_buffer_size_base(const struct ggml_tensor * dst, int n
         K->nb[2] == ggml_row_size(K->type, K->ne[0]) && V->nb[2] == ggml_row_size(V->type, V->ne[0])))) {
         auto row_size_k = ggml_row_size(K->type, K->ne[0])*K->ne[2];
         auto row_size_v = ggml_row_size(V->type, V->ne[0])*K->ne[2];
-        auto work_size  = (row_size_k + row_size_v + 64) * indexer->ne[0];
+        auto work_size  = (row_size_k + row_size_v + 64) * fa_gather_rows(indexer->ne[0]);
         size_t result = work_size * nth;
         if (Q->ne[1] == 1) result += 512*sizeof(float);
         return result;
@@ -943,12 +945,15 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
             // * indexer->ne[0] * sizeof(ggml_half) to extract the mask for a row
             // * indexer->ne[0] * ggml_row_size(int_type_k_in, Dk) to extract the selected K cache entries
             // * indexer->ne[0] * ggml_row_size(int_type_v, Dv) to extract the selected V cache entries
+            // The kernels take the rows 32 at a time: a list whose length is not a multiple of 32 is made up to one
+            // with entries that name no row (fa_gather_rows, also for iqk_fa_work_buffer_size_base).
             auto row_size_k = ggml_row_size(ggml_type(int_type_k_in), Dk)*nek2;
             auto row_size_v = ggml_row_size(ggml_type(int_type_v   ), Dv)*nek2;
-            auto work_size  = (row_size_k + row_size_v + 64) * indexer->ne[0];
+            int  nkv = fa_gather_rows(indexer->ne[0]);
+            auto work_size  = (row_size_k + row_size_v + 64) * nkv;
             ggml_fp16_t h_inf = ggml_fp32_to_fp16(-INFINITY);
             ggml_fp16_t h_zero = ggml_fp32_to_fp16(0.0f);
-            int  nkv = indexer->ne[0];
+            const int n_listed = indexer->ne[0];
             if (neq1 == 1) {
                 GGML_ASSERT(neq2 <= 256);
                 int npt = (neq2 + nth - 1)/nth;
@@ -966,11 +971,11 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
                 auto idx = (const int *)indexer->data;
                 auto M = (const ggml_fp16_t *)mask;
                 auto work_k = (char *)work_buffer_in;
-                auto work_v = work_k + row_size_k*indexer->ne[0];
-                auto work_m = (ggml_fp16_t *)(work_v + row_size_v*indexer->ne[0]) + indexer->ne[0]*ith;
+                auto work_v = work_k + row_size_k*nkv;
+                auto work_m = (ggml_fp16_t *)(work_v + row_size_v*nkv) + nkv*ith;
                 int last_found = -1;
                 for (int j = 0; j < nkv; ++j) {
-                    if (idx[j] >= 0) {
+                    if (j < n_listed && idx[j] >= 0) {
                         last_found = j;
                         work_m[j] = M ? M[idx[j]] : h_zero;
                         if (j % nth == ith) {
@@ -1030,8 +1035,8 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
                 }
             }
             auto work_k = (char *)work_buffer_in + ith*work_size;
-            auto work_v = work_k + row_size_k*indexer->ne[0];
-            auto work_m = (ggml_fp16_t *)(work_v + row_size_v*indexer->ne[0]);
+            auto work_v = work_k + row_size_k*nkv;
+            auto work_m = (ggml_fp16_t *)(work_v + row_size_v*nkv);
             // A batch of tokens, one K/V head in f16, K and V the same rows: through the tiles of AMX when asked for
             // (GGML_AMX_ATTN=1). Every thread gets the same answer here.
             const bool tiles = nek2 == 1 && neq1 >= k_fa_seen_max_q && iqk_amx_attn() &&
@@ -1040,14 +1045,14 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
                 auto idx = (const int *)((const char *)indexer->data + iq*indexer->nb[1]);
                 auto M = mask ? (const ggml_fp16_t *)((const char *)mask + iq*size_t(stride_m)) : nullptr;
                 if (tiles) {
-                    iqk_amx_flash_attn(Dk, nh, nkv, (const float *)((const char *)q + iq*stride_q + h_first*nbq2), nbq2,
+                    iqk_amx_flash_attn(Dk, nh, n_listed, (const float *)((const char *)q + iq*stride_q + h_first*nbq2), nbq2,
                             k, stride_k, idx, M, sinks ? (const float *)sinks + h_first : nullptr, scale,
                             qkv + (size_t(iq)*ne1 + h_first)*nb1/sizeof(float), Dv*sizeof(float));
                     continue;
                 }
                 int last_found = -1;
                 for (int j = 0; j < nkv; ++j) {
-                    if (idx[j] >= 0) {
+                    if (j < n_listed && idx[j] >= 0) {
                         std::memcpy(work_k + row_size_k*j, ((const char *)k + idx[j]*stride_k), row_size_k);
                         if (k != v) {
                             std::memcpy(work_v + row_size_v*j, ((const char *)v + idx[j]*stride_v), row_size_v);

@@ -228,8 +228,7 @@ static void check_empty() {
 }
 
 // The attention node of a graph: n_q tokens of n_head heads on a cache of n_kv rows, K = V, every token with its
-// list. mode 1: the lists and the mask; 2: the lists alone. n_idx is a multiple of 32, as in the graphs of the
-// models: the usual kernels need that (the kernel of the tiles does not, see the cases above).
+// list. mode 1: the lists and the mask; 2: the lists alone.
 static void check_graph(int D, int n_head, int n_q, int n_kv, int n_idx, int mode, bool with_sinks) {
     ggml_init_params ip = { (size_t)1 << 30, nullptr, false };
     ggml_context * ctx = ggml_init(ip);
@@ -362,6 +361,8 @@ int main() {
     check_graph(512, 64,  9, 2048, 512, 1, false);
     check_graph(128, 32, 40, 1500, 256, 1, true);
     check_graph(128, 24, 33, 1500, 192, 2, true);
+    check_graph(128, 24, 33, 1500, 200, 2, true);    // lists whose length is not a multiple of 32
+    check_graph(512, 64,  9, 2048, 333, 1, false);
     check_graph( 64,  8,  8,  800, 128, 2, false);
     check_graph( 64,  5, 70,  800, 160, 1, false);
     check_graph(128, 32,  4, 1500, 256, 1, false);   // a draft: not through the tiles
