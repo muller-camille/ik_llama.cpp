@@ -150,43 +150,89 @@ typedef void (*mul_mat_t)(int n, const void * vx, size_t bx, const DataInfo& inf
 // run far enough ahead. Asking for the bytes iqk_prefetch_distance() ahead of the ones being computed gives
 // 14 and 12.7 GB/s on that core, until the memory itself is the limit.
 //
-// IQK_PREFETCH=<bytes> in the environment sets the distance, IQK_PREFETCH=0 turns the prefetching off.
+// IQK_PREFETCH=<bytes>[,<far bytes>[,<level>]] in the environment:
+//   <bytes>      the distance, IQK_PREFETCH=0 turns the prefetching off;
+//   <far bytes>  a second request for the same bytes from farther ahead, sent to the L2 cache; 0 = none, the
+//                default. A request to L1 holds one of the few fill buffers of the core until the bytes are
+//                there, and that is what bounds one core near 12 to 14 GB/s; whether requests to L2 get past
+//                that bound is for a measurement on the machine to say;
+//   <level>      where the first request brings the bytes: 0 = L1 (prefetcht0, the default), 1 = L2
+//                (prefetcht1), 2 = prefetcht2, 3 = L1 without L2 (prefetchnta).
 int iqk_prefetch_distance();
+// set by the first call of iqk_prefetch_distance(), which every kernel makes before it prefetches
+extern int iqk_pf_far;
+extern int iqk_pf_level;
 
+static inline void iqk_prefetch_line(const char * p, int level) {
 #if defined(_MSC_VER) && !defined(__clang__)
-#define IQK_PREFETCH_T0(p) _mm_prefetch((const char *)(p), _MM_HINT_T0)
+    switch (level) {
+        case 1:  _mm_prefetch(p, _MM_HINT_T1);  break;
+        case 2:  _mm_prefetch(p, _MM_HINT_T2);  break;
+        case 3:  _mm_prefetch(p, _MM_HINT_NTA); break;
+        default: _mm_prefetch(p, _MM_HINT_T0);  break;
+    }
 #else
-#define IQK_PREFETCH_T0(p) __builtin_prefetch((p), 0, 3)
+    switch (level) {
+        case 1:  __builtin_prefetch(p, 0, 2); break;
+        case 2:  __builtin_prefetch(p, 0, 1); break;
+        case 3:  __builtin_prefetch(p, 0, 0); break;
+        default: __builtin_prefetch(p, 0, 3); break;
+    }
 #endif
+}
+
+static inline void iqk_prefetch_span(const char * p, int n_bytes, int level) {
+    for (int o = 0; o < n_bytes; o += 64) {
+        iqk_prefetch_line(p + o, level);
+    }
+}
 
 // the first bytes of a run of weights, before the kernel starts on it
 static inline void iqk_prefetch_start(const void * vx, size_t size) {
     const size_t n = std::min<size_t>(size, iqk_prefetch_distance());
+    const int level = iqk_pf_level;
     for (size_t o = 0; o < n; o += 64) {
-        IQK_PREFETCH_T0((const char *)vx + o);
+        iqk_prefetch_line((const char *)vx + o, level);
     }
 }
 
 // the n_bytes that the kernel will read `dist` bytes after p, if they are before the end of the run
 static inline void iqk_prefetch_ahead(const char * p, int n_bytes, int dist, const char * end) {
-    p += dist;
-    if (dist > 0 && p + n_bytes <= end) {
-        for (int o = 0; o < n_bytes; o += 64) {
-            IQK_PREFETCH_T0(p + o);
-        }
+    if (dist <= 0) {
+        return;
+    }
+    if (p + dist + n_bytes <= end) {
+        iqk_prefetch_span(p + dist, n_bytes, iqk_pf_level);
+    }
+    const int far = iqk_pf_far;
+    if (far > 0 && p + far + n_bytes <= end) {
+        iqk_prefetch_span(p + far, n_bytes, 1);
     }
 }
 
 // The same for a kernel that reads two groups of interleaved rows at a time: the bytes that follow a group
-// belong to the other group of the pair, the run of this one goes on `skip` bytes later.
-static inline void iqk_prefetch_ahead(const char * p, int n_bytes, int dist, const char * group_end, size_t skip, const char * end) {
+// belong to the other group of the pair, the run of this one goes on `skip` bytes later, and `skip` is also the
+// size of a group. A distance longer than a group steps over as many groups of the other run as it crosses.
+static inline const char * iqk_prefetch_target(const char * p, int dist, const char * group_end, size_t skip) {
     p += dist;
-    if (p >= group_end) {
-        p += skip;
+    if (p >= group_end && skip > 0) {
+        p += ((size_t)(p - group_end)/skip + 1)*skip;
     }
-    if (dist > 0 && p + n_bytes <= end) {
-        for (int o = 0; o < n_bytes; o += 64) {
-            IQK_PREFETCH_T0(p + o);
+    return p;
+}
+static inline void iqk_prefetch_ahead(const char * p, int n_bytes, int dist, const char * group_end, size_t skip, const char * end) {
+    if (dist <= 0) {
+        return;
+    }
+    const char * q = iqk_prefetch_target(p, dist, group_end, skip);
+    if (q + n_bytes <= end) {
+        iqk_prefetch_span(q, n_bytes, iqk_pf_level);
+    }
+    const int far = iqk_pf_far;
+    if (far > 0) {
+        q = iqk_prefetch_target(p, far, group_end, skip);
+        if (q + n_bytes <= end) {
+            iqk_prefetch_span(q, n_bytes, 1);
         }
     }
 }

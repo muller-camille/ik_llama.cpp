@@ -1,31 +1,34 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 330" width="920" height="330" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 366" width="920" height="366" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Reading a prompt of 12616 tokens</title>
-<desc id="d">Bar chart, tokens per second. Batches of 512 tokens (UBATCH=512): 241. Batches of 2048, former indexer (GGML_INDEXER_512=0): 315. Batches of 2048 tokens, what the scripts do: 326. Batches of 4096 tokens (UBATCH=4096): 325. Batches of 2048 tokens, 64 threads: 339.</desc>
-<rect x="0.5" y="0.5" width="919" height="329" rx="8" fill="#1a1a19" stroke="#2c2c2a"/>
+<desc id="d">Bar chart, tokens per second. Batches of 512 tokens (UBATCH=512): 267. Batches of 2048, without AMX (GGML_AMX=0): 326. Batches of 2048, former indexer (GGML_INDEXER_512=0): 347. Batches of 2048 tokens, what the scripts do: 361. Batches of 4096 tokens (UBATCH=4096): 361. Batches of 2048 tokens, 64 threads: 358.</desc>
+<rect x="0.5" y="0.5" width="919" height="365" rx="8" fill="#1a1a19" stroke="#2c2c2a"/>
 <text x="24" y="32" font-size="16" font-weight="600" fill="#f0efec">Reading a prompt of 12616 tokens</text>
-<text x="24" y="52" font-size="12" fill="#c3c2b7">Tokens per second, rhel8-b5371 on 2 x 16 cores, 32 threads unless said, means of 3 readings</text>
-<line x1="515.4" y1="76" x2="515.4" y2="264" stroke="#2c2c2a" stroke-width="1"/>
-<line x1="638.9" y1="76" x2="638.9" y2="264" stroke="#2c2c2a" stroke-width="1"/>
-<line x1="762.3" y1="76" x2="762.3" y2="264" stroke="#2c2c2a" stroke-width="1"/>
-<text x="392.0" y="282" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0</text>
-<text x="515.4" y="282" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">100</text>
-<text x="638.9" y="282" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">200</text>
-<text x="762.3" y="282" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">300</text>
+<text x="24" y="52" font-size="12" fill="#c3c2b7">Tokens per second, rhel8-b5379 on 2 x 16 cores, 32 threads unless said, means of 3 readings</text>
+<line x1="515.4" y1="76" x2="515.4" y2="300" stroke="#2c2c2a" stroke-width="1"/>
+<line x1="638.9" y1="76" x2="638.9" y2="300" stroke="#2c2c2a" stroke-width="1"/>
+<line x1="762.3" y1="76" x2="762.3" y2="300" stroke="#2c2c2a" stroke-width="1"/>
+<text x="392.0" y="318" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0</text>
+<text x="515.4" y="318" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">100</text>
+<text x="638.9" y="318" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">200</text>
+<text x="762.3" y="318" font-size="11" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">300</text>
 <text x="24" y="102.0" font-size="12" fill="#c3c2b7">Batches of 512 tokens (UBATCH=512)</text>
-<path d="M392,89.0 h293.8 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-293.8 z" fill="#3987e5"><title>Batches of 512 tokens (UBATCH=512): 241.3 tokens/s</title></path>
-<text x="697.8" y="102.0" font-size="12" font-weight="600" fill="#f0efec">241</text>
-<text x="24" y="138.0" font-size="12" fill="#c3c2b7">Batches of 2048, former indexer (GGML_INDEXER_512=0)</text>
-<path d="M392,125.0 h385.0 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-385.0 z" fill="#3987e5"><title>Batches of 2048, former indexer (GGML_INDEXER_512=0): 315.2 tokens/s</title></path>
-<text x="789.0" y="138.0" font-size="12" font-weight="600" fill="#f0efec">315</text>
-<text x="24" y="174.0" font-size="12" fill="#c3c2b7">Batches of 2048 tokens, what the scripts do</text>
-<path d="M392,161.0 h398.5 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-398.5 z" fill="#3987e5"><title>Batches of 2048 tokens, what the scripts do: 326.1 tokens/s</title></path>
-<text x="802.5" y="174.0" font-size="12" font-weight="600" fill="#f0efec">326</text>
-<text x="24" y="210.0" font-size="12" fill="#c3c2b7">Batches of 4096 tokens (UBATCH=4096)</text>
-<path d="M392,197.0 h397.6 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-397.6 z" fill="#3987e5"><title>Batches of 4096 tokens (UBATCH=4096): 325.4 tokens/s</title></path>
-<text x="801.6" y="210.0" font-size="12" font-weight="600" fill="#f0efec">325</text>
-<text x="24" y="246.0" font-size="12" fill="#c3c2b7">Batches of 2048 tokens, 64 threads</text>
-<path d="M392,233.0 h414.7 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-414.7 z" fill="#3987e5"><title>Batches of 2048 tokens, 64 threads: 339.2 tokens/s</title></path>
-<text x="818.7" y="246.0" font-size="12" font-weight="600" fill="#f0efec">339</text>
-<line x1="392" y1="76" x2="392" y2="264" stroke="#383835" stroke-width="1"/>
-<text x="24" y="314" font-size="11" fill="#898781">One build and one setting changed at a time, without the drafter. With the drafter loaded the figures are the same within 1% at 32 threads.</text>
+<path d="M392,89.0 h325.2 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-325.2 z" fill="#3987e5"><title>Batches of 512 tokens (UBATCH=512): 266.7 tokens/s</title></path>
+<text x="729.2" y="102.0" font-size="12" font-weight="600" fill="#f0efec">267</text>
+<text x="24" y="138.0" font-size="12" fill="#c3c2b7">Batches of 2048, without AMX (GGML_AMX=0)</text>
+<path d="M392,125.0 h398.9 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-398.9 z" fill="#3987e5"><title>Batches of 2048, without AMX (GGML_AMX=0): 326.4 tokens/s</title></path>
+<text x="802.9" y="138.0" font-size="12" font-weight="600" fill="#f0efec">326</text>
+<text x="24" y="174.0" font-size="12" fill="#c3c2b7">Batches of 2048, former indexer (GGML_INDEXER_512=0)</text>
+<path d="M392,161.0 h424.7 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-424.7 z" fill="#3987e5"><title>Batches of 2048, former indexer (GGML_INDEXER_512=0): 347.3 tokens/s</title></path>
+<text x="828.7" y="174.0" font-size="12" font-weight="600" fill="#f0efec">347</text>
+<text x="24" y="210.0" font-size="12" fill="#c3c2b7">Batches of 2048 tokens, what the scripts do</text>
+<path d="M392,197.0 h441.2 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-441.2 z" fill="#3987e5"><title>Batches of 2048 tokens, what the scripts do: 360.7 tokens/s</title></path>
+<text x="845.2" y="210.0" font-size="12" font-weight="600" fill="#f0efec">361</text>
+<text x="24" y="246.0" font-size="12" fill="#c3c2b7">Batches of 4096 tokens (UBATCH=4096)</text>
+<path d="M392,233.0 h441.2 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-441.2 z" fill="#3987e5"><title>Batches of 4096 tokens (UBATCH=4096): 360.7 tokens/s</title></path>
+<text x="845.2" y="246.0" font-size="12" font-weight="600" fill="#f0efec">361</text>
+<text x="24" y="282.0" font-size="12" fill="#c3c2b7">Batches of 2048 tokens, 64 threads</text>
+<path d="M392,269.0 h438.1 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-438.1 z" fill="#3987e5"><title>Batches of 2048 tokens, 64 threads: 358.2 tokens/s</title></path>
+<text x="842.1" y="282.0" font-size="12" font-weight="600" fill="#f0efec">358</text>
+<line x1="392" y1="76" x2="392" y2="300" stroke="#383835" stroke-width="1"/>
+<text x="24" y="350" font-size="11" fill="#898781">One build and one setting changed at a time, without the drafter. With the drafter loaded the figures are the same within 1% at 32 threads.</text>
 </svg>
