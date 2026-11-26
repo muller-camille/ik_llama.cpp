@@ -159,6 +159,9 @@ set_tests_properties(test-indexer-topk-other-way PROPERTIES ENVIRONMENT "GGML_IN
 # the products of a batch through the tiles of AMX, where the machine has them
 llama_build(test-amx-gemm.cpp)
 llama_test(test-amx-gemm)
+# the attention of a batch through the same tiles (GGML_AMX_ATTN=1), against the sums in double precision
+llama_build(test-amx-attn.cpp)
+llama_test(test-amx-attn)
 
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)

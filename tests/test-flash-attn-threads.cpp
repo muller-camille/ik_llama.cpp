@@ -138,8 +138,9 @@ static bool sees(int layout, int iq, int n_q, int ik, int n_kv) {
 // n_split > 0: K, which is V then, is the concatenation of its first n_split rows and of the others, left undone
 // (ggml_flash_attn_ext_lazy_kv). The attention reads the two parts where they are, or makes the concatenation first.
 static int n_lazy = 0;
+// n_idx_given > 0: the length of the lists, which need not be a multiple of 32
 static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv, int layout, bool with_sinks, bool k_is_v, int index_mode,
-        int n_split = 0) {
+        int n_split = 0, int n_idx_given = 0) {
     const bool with_index = index_mode != 0;
     ggml_init_params ip = { (size_t) 1 << 30, nullptr, false };
     ggml_context * ctx = ggml_init(ip);
@@ -180,7 +181,7 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
     if (with_index) {
         // long enough for the rows in view, and shorter than the cache: a list as long as the cache is left to
         // the generic implementation
-        const int n_idx = layout == 4 ? GGML_PAD(48 + (n_kv - 256)/5, 32) : 256;
+        const int n_idx = n_idx_given > 0 ? n_idx_given : layout == 4 ? GGML_PAD(48 + (n_kv - 256)/5, 32) : 256;
         index = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_idx, GGML_PAD(n_q, 16));
         for (int iq = 0; iq < (int) index->ne[1]; ++iq) {
             int32_t * id = (int32_t *) index->data + (size_t) iq*n_idx;
@@ -285,9 +286,10 @@ static void test_masked(ggml_type type_kv, int D, int n_head, int n_q, int n_kv,
         }
     }
     if (!bad.empty()) {
-        fprintf(stderr, "FAILED: masked %s head size %3d, %2d heads, %d query row(s), cache %4d, layout %d%s%s%s%s:%s\n",
+        fprintf(stderr, "FAILED: masked %s head size %3d, %2d heads, %d query row(s), cache %4d, layout %d%s%s%s%s%s:%s\n",
                 ggml_type_name(type_kv), D, n_head, n_q, n_kv, layout, with_sinks ? ", sinks" : "", k_is_v ? ", K == V" : "",
                 index_mode == 1 ? ", index list" : index_mode == 2 ? ", index list alone" : "",
+                n_idx_given > 0 ? (" of " + std::to_string(n_idx_given) + " rows").c_str() : "",
                 n_split > 0 ? (", in two parts, the first of " + std::to_string(n_split) + " rows").c_str() : "", bad.c_str());
         n_fail++;
     }
@@ -464,6 +466,24 @@ int main(int argc, char ** argv) {
     for (int n_q : { 1, 3 }) {
         test_masked(GGML_TYPE_F16, 512, 64, n_q, 9216, 4, n_q == 1, true, 2);
         ++n_tests;
+    }
+    // Lists whose length is not a multiple of 32, with rows in their last, incomplete block of 32 (layout 4 with a
+    // cache of 768 rows has 142 or 143 rows in view), or without (140 rows in view of layout 0 would not fit: 61).
+    // The kernels take whole blocks, so the rows that are missing have to be made up.
+    for (const auto & s : masked) {
+        if (s.D == 48) {
+            continue; // no kernel
+        }
+        for (int n_q : { 1, 2, 5, 9, 12, 40 }) {
+            for (int n_idx : { 150, 143, 191 }) {
+                for (int index_mode = 1; index_mode < 3; ++index_mode) {
+                    test_masked(s.type, s.D, s.n_head, n_q, 768, 4, (n_q + index_mode) % 2 == 0, (n_q + n_idx) % 2 == 0, index_mode, 0, n_idx);
+                    ++n_tests;
+                }
+            }
+            test_masked(s.type, s.D, s.n_head, n_q, 768, 0, n_q % 2 == 0, true, 2, 0, 70);
+            ++n_tests;
+        }
     }
     // K and V in two parts that are not put together: the first part ends at a whole block of 32 rows or not, the
     // rows in view lie in one part or in both, and with 9 query rows the kernels do not read through at all

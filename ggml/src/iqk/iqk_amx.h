@@ -10,6 +10,8 @@
 //
 // GGML_AMX=0 in the environment turns it off.
 //
+// The attention of a batch of tokens can go the same way (GGML_AMX_ATTN=1, see iqk_amx_flash_attn below).
+//
 
 #pragma once
 
@@ -34,6 +36,28 @@ IQK_API void iqk_amx_from_float(const float * x, void * y, int64_t n);
 
 // for the tests: 0 = not from now on, 1 = again (where iqk_amx_bf16() was 1 at the start)
 IQK_API void iqk_amx_enable(int on);
+
+// 1 if the attention of a batch of tokens goes through the tiles (iqk_amx_flash_attn below): iqk_amx_bf16() is 1
+// and GGML_AMX_ATTN=1 is in the environment. It is off unless asked for.
+IQK_API int iqk_amx_attn(void);
+
+// for the tests: -1 = as the environment says, 0 = not from now on, 1 = from now on (where iqk_amx_bf16() is 1)
+IQK_API void iqk_amx_attn_enable(int on);
+
+// The attention of one token through the tiles: its nq query rows (heads, D floats each, stride_q bytes apart) on
+// the rows of its list. K and V are the same rows of D f16 values: row idx[j] of the cache is at
+// kv + idx[j]*stride_kv, and idx[j] < 0 names no row. mask: one f16 per row of the cache, a row is seen where it is
+// 0; nullptr if all the rows of the list are seen. sinks: one value per query row, or nullptr.
+// out: nq rows of D floats, stride_out bytes apart. No soft cap of the scores.
+// The scores are scale * q.k with q and k rounded to bf16, the weights exp(score - max) are rounded to bf16 and
+// multiply V rounded to bf16; the sums are in fp32.
+// Only where iqk_amx_attn_fits() is 1; nothing is written if the list names no row, as without the tiles.
+IQK_API void iqk_amx_flash_attn(int D, int nq, int n, const float * q, long stride_q, const void * kv, long stride_kv,
+                                const int * idx, const uint16_t * mask, const float * sinks, float scale,
+                                float * out, long stride_out);
+
+// 1 if iqk_amx_flash_attn can compute this attention: K and V are the same f16 rows of D values, D a multiple of 32
+IQK_API int iqk_amx_attn_fits(int type_k, int type_v, int same_rows, int Dk, int Dv, float softcap);
 
 #ifdef __cplusplus
 }

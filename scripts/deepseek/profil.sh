@@ -27,12 +27,12 @@
 # Avec un drafter, le résultat donne aussi pour chaque passe les pas du drafter (une proposition et sa
 # vérification par le modèle) : leur durée (ms/pas) et les tokens produits par pas (tok/pas).
 #
-# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 30 passes, environ 2 heures, pendant
-# lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 12 en 20 minutes. Ctrl+C arrête le
+# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 32 passes, environ 2 heures, pendant
+# lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 14 en 25 minutes. Ctrl+C arrête le
 # script et écrit le résumé des passes déjà faites.
 #
-#   RAPIDE     1 = la version courte : 2 essais par passe, une seule lecture du texte long, et les deux
-#              réglages GGML_AMX=0 et UBATCH=512
+#   RAPIDE     1 = la version courte : 2 essais par passe, une seule lecture du texte long, et les trois
+#              réglages GGML_AMX=0, GGML_AMX_ATTN=1 et UBATCH=512
 #   THREADS    les nombres de threads à mesurer. Par défaut les cœurs physiques puis les processeurs
 #              logiques (32 et 64 sur 2 x 16 cœurs à hyperthreading). a/b = a threads pour un token seul et
 #              b pour les lots de tokens (options -t et -tb du serveur) : mesuré avec rhel8-b5379, 32/64
@@ -44,6 +44,11 @@
 #                cela change ;
 #              - GGML_AMX=0 lit le prompt sans les tuiles AMX du processeur (Sapphire Rapids et suivants) :
 #                les produits des matrices Q8_0_R8 par un lot de tokens reprennent les noyaux AVX-512 ;
+#              - GGML_AMX_ATTN=1 fait passer aussi l'attention d'un lot de tokens par les tuiles AMX : c'est
+#                le seul réglage de la liste qui ajoute quelque chose au lieu de le couper. Il n'est pas
+#                encore celui de deepseek.sh : cette passe dit ce qu'il donne (ligne « texte lu », et
+#                FLASH_ATTN_EXT dans le chronométrage). Les requêtes, les lignes du cache et les poids de
+#                l'attention y sont arrondis à 8 bits significatifs (bf16) ;
 #              - GGML_INDEXER_512=0 reprend l'ancien indexeur à la place de celui en AVX-512 ;
 #              - GGML_FA_ROW_GROUPS=-1 tire au sort la grille de threads de l'attention à chaque nœud, et le
 #                chronométrage dit ce que chacune a coûté (les tokens/s de ces passes ne se comparent donc
@@ -156,11 +161,11 @@ if [ -n "$DRAFT" ] && [ ! -f "$DRAFT" ] && [ -f "$(dirname "$MODEL")/$DRAFT" ]; 
 fi
 RAPIDE=${RAPIDE:-0}
 if [ "$RAPIDE" = 1 ]; then
-    VARS=${VARS-GGML_AMX=0 UBATCH=512}
+    VARS=${VARS-GGML_AMX=0 GGML_AMX_ATTN=1 UBATCH=512}
     ESSAIS=${ESSAIS:-2}
     LECTURES=${LECTURES:-1}
 fi
-VARS=${VARS-GGML_AMX=0 UBATCH=512 UBATCH=4096 GGML_INDEXER_512=0 GGML_FA_ROW_GROUPS=-1 GGML_LAZY_CONCAT=0 GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0 GGML_HC_PROJ=0 GGML_SERIAL_NODES=0 IQK_PREFETCH=0}
+VARS=${VARS-GGML_AMX=0 GGML_AMX_ATTN=1 UBATCH=512 UBATCH=4096 GGML_INDEXER_512=0 GGML_FA_ROW_GROUPS=-1 GGML_LAZY_CONCAT=0 GGML_FA_SKIP_MASKED=0 GGML_SHARE_ROWS=0 GGML_HC_PROJ=0 GGML_SERIAL_NODES=0 IQK_PREFETCH=0}
 CONTEXTE=${CONTEXTE:-16000}
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}
