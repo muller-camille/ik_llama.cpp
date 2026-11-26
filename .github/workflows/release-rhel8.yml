@@ -286,7 +286,7 @@ jobs:
           GGML_PROFILE=1 ./llama-server -m model.gguf ... 2> server.log    # stop it with Ctrl+C, then: grep ggml_profile server.log
           \`\`\`
 
-          On a Xeon with AMX (Sapphire Rapids and later), a batch of 48 tokens or more is multiplied with the \`Q8_0_R8\` matrices through the AMX tiles, as bf16: about twice as fast for those products, which are a fifth of the reading of a prompt with DeepSeek-V4.1. \`grep amx /proc/cpuinfo\` tells whether the system gives AMX to programs; \`GGML_AMX=0\` in the environment turns it off.
+          On a Xeon with AMX (Sapphire Rapids and later), a batch of 48 tokens or more is multiplied with the \`Q8_0_R8\` matrices through the AMX tiles, as bf16: about twice as fast for those products, which are a fifth of the reading of a prompt with DeepSeek-V4.1. \`grep amx /proc/cpuinfo\` tells whether the system gives AMX to programs; \`GGML_AMX=0\` in the environment turns it off. \`GGML_AMX_ATTN=1\` sends the attention of a prompt batch through the tiles too (DeepSeek-V4: a third of the reading of a prompt). It is not the default: queries, cache rows and attention weights are rounded to bf16 there, and its speed is not measured yet.
 
           \`llama-server --webui llamacpp\` serves the current web UI of llama.cpp ("Llama Chat"); without the option it serves the one of ik_llama.cpp.
 

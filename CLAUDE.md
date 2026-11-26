@@ -12,3 +12,12 @@ Set by the owner of this fork on 2026-11-24, after having to say it four times. 
   put an estimate or a figure from the container in its place.
 
 Building the code to check that it compiles before a push is not an experiment.
+
+## Checks of a result are not experiments
+
+Set by the owner on 2026-11-26, when asked.
+
+- A new kernel may be run in the container to check what it computes: against the current kernel, or against the
+  same sums written out in double precision, on random numbers. `tests/test-amx-attn` is such a check.
+- Nothing is timed there, the `--bench` modes of the tests included, and no model is run. Speed is measured on the
+  server only, as above.

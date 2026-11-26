@@ -7,6 +7,7 @@
 #include "iqk_config.h"
 #include "iqk_mul_mat.h"
 #include "iqk_flash_impl.h"
+#include "iqk_amx.h"
 #include "ggml.h"
 
 #if defined IQK_IMPLEMENT && defined GGML_IQK_FLASH_ATTENTION
@@ -1031,9 +1032,19 @@ extern "C" IQK_API bool iqk_flash_attn_noalibi(int type_q, int type_mask, float 
             auto work_k = (char *)work_buffer_in + ith*work_size;
             auto work_v = work_k + row_size_k*indexer->ne[0];
             auto work_m = (ggml_fp16_t *)(work_v + row_size_v*indexer->ne[0]);
+            // A batch of tokens, one K/V head in f16, K and V the same rows: through the tiles of AMX when asked for
+            // (GGML_AMX_ATTN=1). Every thread gets the same answer here.
+            const bool tiles = nek2 == 1 && neq1 >= k_fa_seen_max_q && iqk_amx_attn() &&
+                iqk_amx_attn_fits(int_type_k_in, int_type_v, k == v && stride_k == stride_v, Dk, Dv, softcap);
             for (int iq = first; iq < first + neq1_this_thread; ++iq) {
                 auto idx = (const int *)((const char *)indexer->data + iq*indexer->nb[1]);
                 auto M = mask ? (const ggml_fp16_t *)((const char *)mask + iq*size_t(stride_m)) : nullptr;
+                if (tiles) {
+                    iqk_amx_flash_attn(Dk, nh, nkv, (const float *)((const char *)q + iq*stride_q + h_first*nbq2), nbq2,
+                            k, stride_k, idx, M, sinks ? (const float *)sinks + h_first : nullptr, scale,
+                            qkv + (size_t(iq)*ne1 + h_first)*nb1/sizeof(float), Dv*sizeof(float));
+                    continue;
+                }
                 int last_found = -1;
                 for (int j = 0; j < nkv; ++j) {
                     if (idx[j] >= 0) {
