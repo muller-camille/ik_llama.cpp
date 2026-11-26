@@ -14,12 +14,9 @@
 # Ce qui est mesuré, sans puis avec le drafter :
 #   1. les nombres de threads (THREADS), après une question courte puis après un texte long (au-delà de 256
 #      tokens de contexte l'attention ne suit plus le même chemin dans le code, et le texte long donne la
-#      vitesse de lecture d'un prompt). Sur une machine à hyperthreading : un thread par cœur physique, un
-#      par processeur logique, et les deux à la fois, écrit 32/64 : les cœurs physiques quand le modèle
-#      calcule un token seul, les processeurs logiques quand il en calcule plusieurs ensemble (la lecture
-#      d'un prompt, la vérification des tokens du drafter). Dans chaque cas la première passe est celle de
-#      deepseek.sh sans réglage, la passe de référence : un thread par processeur logique avec le drafter,
-#      un par cœur physique sans, ou T (et TB) s'ils sont réglés ;
+#      vitesse de lecture d'un prompt). Sur une machine à hyperthreading : un thread par cœur physique, puis
+#      un par processeur logique. Dans chaque cas la première passe est celle de deepseek.sh sans réglage,
+#      la passe de référence : un thread par cœur physique, ou T (et TB) s'ils sont réglés ;
 #   2. un réglage changé à la fois (VARS), après le texte long, avec les threads de la passe de référence.
 # Chaque passe fait plusieurs essais : ESSAIS requêtes de N_PREDICT tokens, chacune sur un autre sujet (le
 # premier est celui de toutes les mesures précédentes, l'histoire de Paris), et après le texte long les
@@ -30,15 +27,16 @@
 # Avec un drafter, le résultat donne aussi pour chaque passe les pas du drafter (une proposition et sa
 # vérification par le modèle) : leur durée (ms/pas) et les tokens produits par pas (tok/pas).
 #
-# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 34 passes, environ 2 h 30, pendant
-# lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 16 en 25 minutes. Ctrl+C arrête le
+# Sur une machine à 2 x 16 cœurs et hyperthreading, avec un drafter : 30 passes, environ 2 heures, pendant
+# lesquelles le serveur habituel doit rester arrêté. RAPIDE=1 en fait 12 en 20 minutes. Ctrl+C arrête le
 # script et écrit le résumé des passes déjà faites.
 #
 #   RAPIDE     1 = la version courte : 2 essais par passe, une seule lecture du texte long, et les deux
 #              réglages GGML_AMX=0 et UBATCH=512
-#   THREADS    les nombres de threads à mesurer. Par défaut les cœurs physiques, les processeurs logiques,
-#              puis les deux à la fois (32, 64 et 32/64 sur 2 x 16 cœurs à hyperthreading). a/b = a threads
-#              pour un token seul et b pour les lots de tokens (options -t et -tb du serveur)
+#   THREADS    les nombres de threads à mesurer. Par défaut les cœurs physiques puis les processeurs
+#              logiques (32 et 64 sur 2 x 16 cœurs à hyperthreading). a/b = a threads pour un token seul et
+#              b pour les lots de tokens (options -t et -tb du serveur) : mesuré avec rhel8-b5379, 32/64
+#              perd 11 ms par pas du drafter, le temps de réveiller les threads à chaque changement
 #   T, TB      les threads de deepseek.sh s'ils sont réglés (~/.deepseek.conf) : ceux de la passe de référence
 #   VARS       les réglages à essayer tour à tour. Par défaut tous ceux qui se comparent :
 #              - UBATCH=512 et UBATCH=4096 lisent le prompt par lots de 512 ou de 4096 tokens au lieu de 2048 :
@@ -53,6 +51,11 @@
 #              - GGML_LAZY_CONCAT=0 recopie le cache en un bloc avant l'attention ; GGML_FA_SKIP_MASKED=0
 #                calcule l'attention sur tout le cache ; GGML_SHARE_ROWS=0, GGML_HC_PROJ=0,
 #                GGML_SERIAL_NODES=0 et IQK_PREFETCH=0 coupent chacun une optimisation de la lecture des poids
+#              Hors de la liste par défaut, la demande des poids en avance se règle aussi :
+#              IQK_PREFETCH=<octets>[,<octets>[,<niveau>]] : la distance à laquelle les noyaux demandent les
+#              poids (4096 par défaut), une deuxième demande plus loin, vers le cache L2 (0 = aucune), et le
+#              niveau de la première (0 = cache L1, par défaut ; 1 = L2 ; 3 = sans passer par L2).
+#              IQK_PREFETCH=1024, IQK_PREFETCH=4096,32768 ou IQK_PREFETCH=16384,0,1 par exemple
 #              (VARS="GGML_INDEXER_512=0" n'en essaie qu'un ; VARS= ne mesure que les nombres de threads)
 #   ESSAIS     requêtes par passe, 5 par défaut ; LECTURES, lectures d'un texte neuf parmi elles, 3 ;
 #              N_PREDICT, tokens produits par requête, 200
@@ -103,19 +106,16 @@ LOGIQUES=$(nproc)
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
 # voulue <drafter ou vide> : les threads de deepseek.sh dans ce cas. T (et TB) s'ils sont réglés, sinon un par
-# processeur logique avec le drafter et un par cœur physique sans, comme deepseek.sh
+# cœur physique, avec ou sans drafter, comme deepseek.sh
 voulue() {
-    local t=${T:-}
-    if [ -z "$t" ]; then
-        if [ -n "$1" ]; then t=$LOGIQUES; else t=$COEURS; fi
-    fi
+    local t=${T:-$COEURS}
     [ -z "${TB:-}" ] || [ "$TB" = "$t" ] || t=$t/$TB
     echo "$t"
 }
 # les nombres de threads à mesurer : a = a threads, a/b = a pour un token seul et b pour les lots de tokens
 if [ -z "${THREADS:-}" ]; then
     THREADS=$COEURS
-    [ "$LOGIQUES" -le "$COEURS" ] || THREADS="$COEURS $LOGIQUES $COEURS/$LOGIQUES"
+    [ "$LOGIQUES" -le "$COEURS" ] || THREADS="$COEURS $LOGIQUES"
     # les threads réglés pour deepseek.sh se mesurent aussi
     for v in "$(voulue "")" "$(voulue drafter)"; do
         case " $THREADS " in
@@ -486,6 +486,12 @@ passe() {
         moyenne="échec"
     fi
 
+    # Les pages de 2 Mo du RAM disk ne servent que si le serveur les a prises entières (ShmemPmdMapped) et non
+    # par morceaux de 4 ko : cela ne se lit que pendant qu'il tourne, une fois les poids parcourus.
+    if [ -z "${PAGES_DITES:-}" ]; then
+        PAGES_DITES=1
+        dire "pages du modèle, serveur en marche : $(grep -E '^(ShmemHugePages|ShmemPmdMapped)' /proc/meminfo | tr -s ' ' | paste -sd ';')"
+    fi
     arreter   # le tableau est écrit à l'arrêt du serveur
     grep -E "draft acceptance rate|statistics ${SPEC%%:*}:" "$LOG" | tail -2 >> "$OUT" || true
     if [ -n "$draft" ]; then

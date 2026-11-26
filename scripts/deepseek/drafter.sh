@@ -38,11 +38,13 @@ fi
 if [ "$(cd "$IK_DIR" 2>/dev/null && pwd -P)" != "$(cd "$ICI" && pwd -P)" ]; then
     echo "== ATTENTION : les outils utilisés sont ceux de $IK_DIR, pas ceux du dossier de ce script ($ICI)"
 fi
-# les threads de deepseek.sh avec un drafter : un par processeur logique
+# les threads de deepseek.sh : un par cœur physique
+COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
+[ "$COEURS" -gt 0 ] 2>/dev/null || COEURS=$(nproc)
 DRAFT=${1:?"Usage : $0 [dossier ik_llama] <fichier drafter>"}
 MODEL=${MODEL:-/mnt/ds0/DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8-00001-of-00009.gguf}
 MIRROR=${MIRROR-/mnt/ds1}
-T=${T:-$(nproc)}
+T=${T:-$COEURS}
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}   # tokens du prompt lus ensemble, comme deepseek.sh
 # le premier est le réglage habituel ; le drafter a été entraîné pour des blocs de 5 tokens

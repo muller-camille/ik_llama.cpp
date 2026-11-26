@@ -16,7 +16,8 @@ from xml.sax.saxutils import escape
 
 # release, tokens/s without a draft, tokens/s with the DSpark draft (None = not measured), and for the releases
 # that are pointed out, what changed. The best thread count measured for each release: 64 up to b5301, 32 from
-# b5308 on (with the draft: from b5317 on).
+# b5308 on (with the draft: from b5317 on, except b5371: 64). From b5379 on a figure with the draft is the mean
+# of five requests on five subjects; before, of five requests on one.
 RELEASES = [
     ("before", 9.7,  None, "weights interleaved between the two sockets (9.4 on one socket)"),
     ("b5294",  18.4, 25.6, "--numa-mirror: one copy of the weights per socket"),
@@ -31,23 +32,25 @@ RELEASES = [
     ("b5357",  22.9, None, None),
     ("b5361",  22.2, None, None),
     ("b5371",  23.0, 33.4, None),
+    ("b5379",  22.9, 29.6, None),
 ]
 
 TITLE    = "Generation speed, release by release"
 SUBTITLE = "Tokens per second, DeepSeek-V4.1-Flash UD-Q4_K_XL on 2 x 16 cores, 200 tokens after a short prompt"
-NOTE     = ("Best thread count measured for each release. Means of 5 runs; one run for b5353, b5357 and b5361, "
-            "single requests for b5294 and before.")
+NOTE     = ("Best thread count per release. Means of 5 runs, b5379 on five subjects; one run for b5353, b5357, "
+            "b5361; single requests up to b5294.")
 SERIES   = ("Without a draft", "With the DSpark draft (n_max=4)")
 
 # the reading of a long prompt: what was run, tokens/s. One prompt and one build for all the bars.
 PROMPT_TITLE    = "Reading a prompt of 12616 tokens"
-PROMPT_SUBTITLE = "Tokens per second, rhel8-b5371 on 2 x 16 cores, 32 threads unless said, means of 3 readings"
+PROMPT_SUBTITLE = "Tokens per second, rhel8-b5379 on 2 x 16 cores, 32 threads unless said, means of 3 readings"
 PROMPT = [
-    ("Batches of 512 tokens (UBATCH=512)",                   241.3),
-    ("Batches of 2048, former indexer (GGML_INDEXER_512=0)", 315.2),
-    ("Batches of 2048 tokens, what the scripts do",          326.1),
-    ("Batches of 4096 tokens (UBATCH=4096)",                 325.4),
-    ("Batches of 2048 tokens, 64 threads",                   339.2),
+    ("Batches of 512 tokens (UBATCH=512)",                   266.7),
+    ("Batches of 2048, without AMX (GGML_AMX=0)",            326.4),
+    ("Batches of 2048, former indexer (GGML_INDEXER_512=0)", 347.3),
+    ("Batches of 2048 tokens, what the scripts do",          360.7),
+    ("Batches of 4096 tokens (UBATCH=4096)",                 360.7),
+    ("Batches of 2048 tokens, 64 threads",                   358.2),
 ]
 PROMPT_NOTE = ("One build and one setting changed at a time, without the drafter. With the drafter loaded the "
                "figures are the same within 1% at 32 threads.")

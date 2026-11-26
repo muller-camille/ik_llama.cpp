@@ -14,6 +14,7 @@
 #include <atomic>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cfloat>
 #include <type_traits>
@@ -712,10 +713,22 @@ static void convert_f8_q80(ggml_type type, int typeA, int n, const void * vx, si
     }
 }
 
+int iqk_pf_far   = 0;
+int iqk_pf_level = 0;
+
 int iqk_prefetch_distance() {
     static const int dist = [] {
-        const char * env = getenv("IQK_PREFETCH");
-        return env ? std::max(0, atoi(env)) : 4096;
+        int d = 4096;
+        if (const char * env = getenv("IQK_PREFETCH")) {
+            int far = 0, level = 0;
+            if (sscanf(env, "%d,%d,%d", &d, &far, &level) < 1) {
+                d = 4096;
+            }
+            d = std::max(0, d);
+            iqk_pf_far   = d > 0 ? std::max(0, far) : 0;
+            iqk_pf_level = level >= 0 && level <= 3 ? level : 0;
+        }
+        return d;
     }();
     return dist;
 }

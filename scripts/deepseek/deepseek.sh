@@ -13,14 +13,17 @@
 #   DRAFT    fichier du drafter dans NFS, vide = sans drafter ; par défaut dspark-...-Q8_0-R8.gguf s'il y
 #            est (le drafter converti, lu plus vite), sinon dspark-...-Q8_0.gguf
 #   SPEC     réglage du drafter, dspark:n_max=4 par défaut
-#   T        threads. Par défaut un par processeur logique avec le drafter, un par cœur physique sans : c'est
-#            ce que profil.sh a mesuré de plus rapide sur 2 x 16 cœurs à hyperthreading (rhel8-b5371). Avec le
-#            drafter, 33,4 tokens/s à 64 threads contre 30,9 à 32, et le prompt lu à 339 tokens/s contre 326 ;
-#            sans drafter, 23,0 à 32 threads contre 21,7 à 64. Un seul cas a donné l'inverse : le drafter
-#            après un prompt de 12 600 tokens, 26,4 à 32 threads contre 23,4 à 64 (T=32 pour ce cas-là).
+#   T        threads. Par défaut un par cœur physique, avec ou sans drafter : c'est ce que profil.sh a mesuré
+#            de plus rapide sur 2 x 16 cœurs à hyperthreading (rhel8-b5379, moyenne de cinq sujets). Sans
+#            drafter, 22,9 tokens/s à 32 threads contre 21,5 à 64 ; avec, 29,6 contre 28,3, et après un prompt
+#            de 12 600 tokens 24,2 contre 23,6 : un pas du drafter dure 80 ms à 32 threads et 83 à 64. Le
+#            prompt se lit à la même vitesse (361 et 358 tokens/s). Avec le drafter le résultat tient au
+#            texte : sur le sujet des mesures précédentes, 64 threads restent devant (31,5 contre 29,8, et
+#            33,4 contre 30,9 avec rhel8-b5371), sur trois des quatre autres c'est 32.
 #            profil.sh refait ces mesures sur votre machine et dit le plus rapide colonne par colonne.
 #   TB       threads quand le modèle calcule plusieurs tokens ensemble (lecture d'un prompt, vérification
-#            des tokens du drafter), option -tb du serveur ; T par défaut
+#            des tokens du drafter), option -tb du serveur ; T par défaut. À laisser égal à T avec un
+#            drafter : mesuré à 32/64, un pas dure 94 ms au lieu de 83, le temps de réveiller les threads.
 #   CTX      contexte, 131072 par défaut
 #   UBATCH   tokens du prompt lus ensemble (option -ub du serveur), 2048 par défaut. Avec --swa-compress, les
 #            19 dernières couches de DeepSeek-V4.1 ne sont calculées que sur les 256 derniers tokens de chaque
@@ -57,10 +60,9 @@ fi
 if [ "$(cd "$IK_DIR" 2>/dev/null && pwd -P)" != "$(cd "$ICI" && pwd -P)" ]; then
     echo "== ATTENTION : les outils utilisés sont ceux de $IK_DIR, pas ceux du dossier de ce script ($ICI)"
 fi
-# les cœurs physiques et les processeurs logiques (le double avec l'hyperthreading)
+# les cœurs physiques (la moitié des processeurs logiques avec l'hyperthreading)
 COEURS=$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
 [ "$COEURS" -gt 0 ] 2>/dev/null || COEURS=$(nproc)
-LOGIQUES=$(nproc)
 NFS=${NFS:?"Indiquez le dossier des fichiers convertis : NFS=... dans ~/.deepseek.conf ou devant la commande"}
 P=${P:-DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8}
 M=${M:-$P}
@@ -73,10 +75,10 @@ SPEC=${SPEC:-dspark:n_max=4}
 API_KEY=${API_KEY:-}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8080}
-# les threads, d'après les mesures : un par processeur logique avec le drafter, un par cœur physique sans
-if [ -z "${T:-}" ]; then
-    if [ -n "$DRAFT" ]; then T=$LOGIQUES; else T=$COEURS; fi
-fi
+# Les threads, d'après les mesures de rhel8-b5379 (cinq sujets par passe) : un par cœur physique, avec ou sans
+# drafter. Un par processeur logique donne 21.5 tokens/s au lieu de 22.9 sans drafter et 28.3 au lieu de
+# 29.6 avec ; TB différent de T perd 11 ms à chaque pas du drafter.
+T=${T:-$COEURS}
 TB=${TB:-}
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}
