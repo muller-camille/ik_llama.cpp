@@ -4278,6 +4278,11 @@ void server_context::batch_pending_prompt(const int32_t n_ubatch, const int32_t 
                                         string_format("request (%d tokens) exceeds the available context size (%d tokens), try increasing it",
                                             slot.n_prompt_tokens, slot.n_ctx),
                                         ERROR_TYPE_EXCEED_CONTEXT_SIZE);
+                                // release() only acts on a slot that is processing; this one is still loading
+                                // its prompt. Without these two lines the refused prompt was read anyway, from
+                                // its first token, until the context was full.
+                                slot.state = SLOT_STATE_PROCESSING;
+                                slot.command = SLOT_COMMAND_NONE;
                                 slot.release();
                                 continue;
                             }
