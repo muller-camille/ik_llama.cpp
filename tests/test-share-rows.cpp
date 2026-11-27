@@ -3,11 +3,11 @@
 // are computed in one go, large and small ones, must give the values of one thread for every thread count,
 // every time. For one token that is bit for bit; for several tokens the kernel of a group of rows can differ.
 //
-// The same holds for the up and gate matrices of a feed-forward computed together, and for the experts of a
-// few tokens, where a thread that finds no chunk left takes the end of the chunks the others are still on
-// (iqk_share_take, iqk_share_steal): second part. There the values are compared, bit for bit and for any number
-// of tokens, with the ones the same number of threads gives when every thread keeps to its own rows: the
-// activation does not round alike for the last rows of a range, so one thread is not the reference.
+// The same holds for the up and gate matrices of a feed-forward computed together (iqk_share_take,
+// iqk_share_steal): second part. There the values are compared, bit for bit and for any number of tokens, with
+// the ones the same number of threads gives when every thread keeps to its own rows: the activation does not
+// round alike for the last rows of a range, so one thread is not the reference. The experts of a few tokens
+// are in the same graphs: their rows are not shared, and the switch must change nothing for them.
 
 #include "ggml.h"
 #include "../ggml/src/iqk/iqk_mul_mat.h"
@@ -98,9 +98,9 @@ int main() {
     printf("%d of %d runs differ from the single-thread result\n", n_fail, n_runs);
 
     // The fused up and gate product of a feed-forward (the shared expert of DeepSeek-V4), and experts: 4 of 12
-    // for each token, up and gate fused, then down. 2048 rows of 1024 values per expert, as rows of 8. The
-    // experts twice, as MXFP4_R8 and as Q8_0_R8: for 2 to 7 tokens the Q8_0_R8 kernel takes another way for a call
-    // that is not a multiple of 16 rows, and with 3, 7 or 9 threads a chunk of an expert is not one.
+    // for each token, up and gate fused, then down. 2048 rows of 1024 values per expert, as rows of 8. For 2 to
+    // 7 tokens the Q8_0_R8 kernel takes another way for a call that is not a multiple of 16 rows, and with 3, 5,
+    // 6, 7 or 9 threads the rows of a thread are not one: the last of them must stay one call.
     int n_fail2 = 0, n_runs2 = 0;
     {
         const int n_embd = 1024, n_ff = 2048, n_expert = 12, n_used = 4, n_ff_dense = 4096;
@@ -116,9 +116,6 @@ int main() {
         ggml_tensor * up   = expert_weights(GGML_TYPE_MXFP4_R8, n_embd, n_ff);
         ggml_tensor * gate = expert_weights(GGML_TYPE_MXFP4_R8, n_embd, n_ff);
         ggml_tensor * down = expert_weights(GGML_TYPE_MXFP4_R8, n_ff, n_embd);
-        ggml_tensor * up_q8   = expert_weights(GGML_TYPE_Q8_0_R8, n_embd, n_ff);
-        ggml_tensor * gate_q8 = expert_weights(GGML_TYPE_Q8_0_R8, n_embd, n_ff);
-        ggml_tensor * down_q8 = expert_weights(GGML_TYPE_Q8_0_R8, n_ff, n_embd);
         // 2 x 4096 rows of 2048 values of Q8_0_R8 are 18 MB: shared up to 64 threads
         ggml_tensor * up_d   = weights(ctx, GGML_TYPE_Q8_0_R8, 2*n_embd, n_ff_dense);
         ggml_tensor * gate_d = weights(ctx, GGML_TYPE_Q8_0_R8, 2*n_embd, n_ff_dense);
@@ -142,14 +139,11 @@ int main() {
                 ggml_tensor * h = ggml_moe_up_gate(ctx, up, gate, x, ids, GGML_UNARY_OP_SILU);
                 ggml_tensor * y = ggml_mul_mat_id(ctx, down, h, ids);
                 ggml_tensor * z = ggml_fused_up_gate(ctx, up_d, gate_d, x_d, GGML_UNARY_OP_SILU);
-                ggml_tensor * h_q8 = ggml_moe_up_gate(ctx, up_q8, gate_q8, x, ids, GGML_UNARY_OP_SILU);
-                ggml_tensor * y_q8 = ggml_mul_mat_id(ctx, down_q8, h_q8, ids);
                 ggml_build_forward_expand(gf, y);
                 ggml_build_forward_expand(gf, z);
-                ggml_build_forward_expand(gf, y_q8);
                 ggml_graph_compute_with_ctx(ctx, gf, n_threads);
                 std::vector<float> out;
-                for (auto * t : { h, y, z, h_q8, y_q8 }) {
+                for (auto * t : { h, y, z }) {
                     const float * p = (const float *) t->data;
                     out.insert(out.end(), p, p + ggml_nelements(t));
                 }
@@ -186,17 +180,14 @@ int main() {
                         }
                         // where: the fused experts (n_ff rows for each of n_used experts and each token), the down
                         // matrices (n_embd rows each), the fused up and gate (n_ff_dense rows for each token)
-                        const size_t n_h = (size_t) n_ff*n_used*n_tok, n_y = (size_t) n_embd*n_used*n_tok, n_z = (size_t) n_ff_dense*n_tok;
+                        const size_t n_h = (size_t) n_ff*n_used*n_tok, n_y = (size_t) n_embd*n_used*n_tok;
                         auto where = [&] (size_t i) {
                             char buf[96];
                             if (i < n_h)            { snprintf(buf, sizeof(buf), "fused experts, row %zu", i%n_ff); return std::string(buf); }
                             i -= n_h;
                             if (i < n_y)            { snprintf(buf, sizeof(buf), "down, row %zu", i%n_embd); return std::string(buf); }
                             i -= n_y;
-                            if (i < n_z)            { snprintf(buf, sizeof(buf), "fused up and gate, row %zu", i%n_ff_dense); return std::string(buf); }
-                            i -= n_z;
-                            if (i < n_h)            { snprintf(buf, sizeof(buf), "fused Q8_0_R8 experts, row %zu", i%n_ff); return std::string(buf); }
-                            snprintf(buf, sizeof(buf), "Q8_0_R8 down, row %zu", (i - n_h)%n_embd);
+                            snprintf(buf, sizeof(buf), "fused up and gate, row %zu", i%n_ff_dense);
                             return std::string(buf);
                         };
                         fprintf(stderr, "FAILED: experts, %d token(s), %d threads, run %d: %zu values differ from the ones without sharing, by up to %.2e of %.2e, from %s to %s\n",
@@ -209,7 +200,7 @@ int main() {
         }
         ggml_free(ctx);
     }
-    printf("%d of %d runs of the fused and expert products differ from the result without sharing\n", n_fail2, n_runs2);
+    printf("%d of %d runs of the fused up and gate product and of the experts differ from the result without sharing\n", n_fail2, n_runs2);
     // a comparison that no thread ever took a row for would say nothing
     const long n_stolen = iqk_share_stolen();
     printf("%ld units of 16 rows were computed by another thread than the one that had them\n", n_stolen);

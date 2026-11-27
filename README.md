@@ -29,9 +29,9 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 1. Take the package of the [latest release](https://github.com/muller-camille/ik_llama.cpp/releases/latest). Nothing has to be installed:
 
    ```
-   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5397/ik_llama-rhel8-b5397-bin-rhel8-x64.tar.gz
-   tar xzf ik_llama-rhel8-b5397-bin-rhel8-x64.tar.gz
-   cd ik_llama-rhel8-b5397
+   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5399/ik_llama-rhel8-b5399-bin-rhel8-x64.tar.gz
+   tar xzf ik_llama-rhel8-b5399-bin-rhel8-x64.tar.gz
+   cd ik_llama-rhel8-b5399
    ```
 
 2. Repack the model files once, and the drafter. The repacked files are the ones the server maps from the RAM disks:
@@ -85,6 +85,7 @@ Nothing is assumed about another machine: the defaults of `deepseek.sh` come fro
 ./profil.sh                                               # every pass: about 2 hours, with the usual server stopped
 env RAPIDE=1 ./profil.sh                                  # the short version, about 25 minutes
 env DRAFT= THREADS=32 VARS=GGML_AMX_ATTN=1 ./profil.sh    # one setting against the reference
+env SANS_DRAFTER=0 CONTEXTE=0 VARS="SPEC=dspark:n_max=4,p_min=0.5 SPEC=dspark:n_max=4,p_min=0.3" ./profil.sh    # settings of the draft
 ```
 
 It measures the thread counts, without and with the draft, after a short and after a long prompt, then one setting changed at a time, and writes `profil-resultat.txt` with a table of the passes and the time of every kind of node of the model. For a server started by hand, `GGML_PROFILE=1` in its environment prints the same node times when it stops. More in [docs/deepseek/measurements.md](docs/deepseek/measurements.md).
@@ -99,7 +100,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 | Threads | One thread per physical core | 20.1 with one per logical CPU | `T` |
 | Weights | They are asked for ahead of their use, 4096 bytes ahead: seven other distances and cache levels were tried, none is faster | 18.9 | `IQK_PREFETCH=0` |
 | Weights | The hyper-connections of DeepSeek-V4 in one node (`hc_proj`) | 19.9 | `GGML_HC_PROJ=0` |
-| Weights | The small nodes of a graph on one thread; rows shared between threads (since `rhel8-b5397` in the shared expert and in the routed experts too, not measured yet) | 21.3, 21.4 | `GGML_SERIAL_NODES=0`, `GGML_SHARE_ROWS=0` |
+| Weights | The small nodes of a graph on one thread; rows shared between threads (since `rhel8-b5397` in the shared expert too: 2.91 ms of a token instead of 3.09) | 21.3, 21.4 | `GGML_SERIAL_NODES=0`, `GGML_SHARE_ROWS=0` |
 | Attention | Only the rows a query sees, on a grid of threads; each token of a draft on its own rows | 19.6 | `GGML_FA_SKIP_MASKED=0` |
 | Attention | The cache of DeepSeek-V4 read in its two parts, not copied together | 21.1 | `GGML_LAZY_CONCAT=0` |
 | Prompt | Batches of 2048 tokens instead of 512 | 267 read | `UBATCH=512` |
@@ -117,7 +118,7 @@ What each change does, how it was checked and what else was measured: [docs/deep
 
 ## Not measured yet
 
-- The rows shared between threads in the shared expert and in the routed experts (`rhel8-b5397`): the values are checked to be the same bit for bit, the gain is not timed on the server. From the profile of `rhel8-b5390`, up to 1 ms of the 45.5 ms of a token.
+- The settings of the DSpark draft. The drafter stops a draft at the first token it is less than 75% sure of (`p_min`), a default that was never compared with others on this server, where it proposes about 1.9 of its 4 tokens per step. `profil.sh` compares them: `SPEC=dspark:n_max=4,p_min=0.5` among its `VARS`.
 - What the attention through Intel AMX (`GGML_AMX_ATTN=1`) does to the answers. Its speed is measured: a prompt is read 26% faster. It rounds queries, cache rows and attention weights to 8 significant bits, 0.26% from the exact result on random numbers, and the text generated after the same prompt is another one. Whether the answers are as good has not been compared, which is why it is not the default.
 - The non-expert tensors in `Q6_K` instead of `Q8_0` (`recompresser.sh`): fewer bytes to read per token, estimated at 8 to 12% for the generation, and it changes the model.
 

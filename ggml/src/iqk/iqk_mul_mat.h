@@ -51,21 +51,18 @@ IQK_API bool iqk_moe_fused_up_gate(long Nx, long Ny, long ne00, int ne11, int un
         float situ_beta, float situ_beta_linear, int ith, int nth);
 
 // The same sharing where the caller hands out the rows: the up and gate matrices of a feed-forward, computed
-// together, and the experts of a token. The slots are the ones above, one per thread.
+// together. The slots are the ones above, one per thread.
 //  - iqk_share_unit_rows(): the rows the kernel takes at a time for the product of a matrix of Nx rows with Ny
 //    tokens (the rows of a thread are made of those), or 0 if that product does not go straight to the kernel
 //    of its type: it is then not computed this way.
-//  - iqk_share_open(): the thread says which units it is on, [first, end) of run id (below 2^20 - 1; a unit
-//    count is below 2^22). What a unit is, is the caller's business. iqk_share_close(): none, or with pending
-//    set none yet: a thread closes its slot as pending before it asks for more work, so that the others wait
-//    for what it will open.
+//  - iqk_share_open(): the thread says which units it has, [first, end) of run id (below 2^20; a unit count is
+//    below 2^22). What a unit is, is the caller's business.
 //  - iqk_share_take(): up to `want` units from the front of the thread's own slot; their number, 0: none left.
 //  - iqk_share_steal(): up to `want` units from the end of the slot of thread `from`, and the run they are of;
-//    their number, 0: none left, -1: that thread has not said yet what it is on.
-//  - iqk_moe_fused_up_gate_rows(), iqk_mul_mat_moe_rows(): rows [first_row, first_row + n_rows) of the product
-//    that iqk_moe_fused_up_gate() and iqk_mul_mat_moe() compute; n_rows and first_row are multiples of the unit.
-//    The thread reads on up to run_end_row (the weights are asked for ahead up to there); goes_on: the call
-//    starts where the last one of this thread stopped.
+//    their number, 0: none left.
+//  - iqk_moe_fused_up_gate_rows(): rows [first_row, first_row + n_rows) of the product that
+//    iqk_moe_fused_up_gate() computes. The thread reads on up to run_end_row (the weights are asked for ahead
+//    up to there); goes_on: the call starts where the last one of this thread stopped.
 //  - iqk_share_enable(): 1 or 0 turns all the sharing of rows on or off whatever GGML_SHARE_ROWS says, -1
 //    gives the say back to it. For the tests; iqk_share_forced() is what was last asked.
 //    iqk_share_stolen(): the units that threads have taken from the slot of another one since the start.
@@ -74,7 +71,6 @@ IQK_API int  iqk_share_forced(void);
 IQK_API long iqk_share_stolen(void);
 IQK_API int  iqk_share_unit_rows(long Nx, long Ny, long ne00, int typeA, int typeB);
 IQK_API void iqk_share_open(void * slots, int ith, uint32_t id, uint32_t first, uint32_t end);
-IQK_API void iqk_share_close(void * slots, int ith, int pending);
 IQK_API int  iqk_share_take(void * slots, int ith, int want, uint32_t * first);
 IQK_API int  iqk_share_steal(void * slots, int from, int want, uint32_t * id, uint32_t * first);
 IQK_API bool iqk_moe_fused_up_gate_rows(long first_row, long n_rows, long run_end_row, int goes_on,
@@ -84,11 +80,6 @@ IQK_API bool iqk_moe_fused_up_gate_rows(long first_row, long n_rows, long run_en
         const char * up_b, const char * gate_b,
         float * C, long nb1, long nb2, const void * vrow_mapping, float limit,
         float situ_beta, float situ_beta_linear);
-IQK_API bool iqk_mul_mat_moe_rows(long first_row, long n_rows, long run_end_row, int goes_on,
-        long Ny, long ne00, int ne11,
-        int typeA, const void * A, long strideA,
-        int typeB, const void * B, long strideB,
-        float * C, long nb1, long nb2, const void * vrow_mapping);
 
 IQK_API int iqk_dequant_type(int type, int Ny);
 

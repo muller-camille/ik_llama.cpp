@@ -19386,15 +19386,19 @@ static void ggml_mul_mat_share_run(const struct ggml_compute_params * params, co
     }
 }
 
-// The same for the up and gate matrices of a feed-forward computed together, and for the experts of a few
-// tokens. A row must get the same value whoever computes it, the one it had with every thread on its own rows,
-// and two things depend on the rows a call is given: the activation takes 16 values at a time, then 8, then one
-// by one, and for several tokens a kernel can take another way for a call that is not a multiple of 16 rows.
-// The up and gate product gives a range of rows to the kernels in tiles of 64 rows from its first row. So the
-// units are 16 rows from the first row of a range, and when the range is not a multiple of 16 rows, its last
-// tile is one unit, computed in a call of its own. The plain product (the down matrices of the experts) gives
-// the whole range in one call when there are fewer tokens than it has kernels: there a range that is not a
-// multiple of 16 rows is not shared at all, see ggml_compute_forward_mul_mat_id.
+// The same for the up and gate matrices of a feed-forward computed together (ggml_compute_forward_mul_mat_up_gate).
+// A row must get the same value whoever computes it, the one it had with every thread on its own rows, and
+// two things depend on the rows a call is given: the activation takes 16 values at a time, then 8, then one by
+// one, and for several tokens a kernel can take another way for a call that is not a multiple of 16 rows. The
+// up and gate product gives a range of rows to the kernels in tiles of 64 rows from its first row. So the units
+// are 16 rows from the first row of a range, and when the range is not a multiple of 16 rows, its last tile is
+// one unit, computed in a call of its own.
+//
+// The experts of a few tokens are not computed this way. Their chunks are handed out one by one, so the threads
+// only wait at the end of the node (busy 91 to 93% with 32 threads on two sockets); letting the others take the
+// end of the last chunks made them busy 96 to 97% and the nodes no shorter (rhel8-b5397: 9.03 ms instead of 9.26
+// for the up and gate matrices of a token, 4.80 instead of 4.69 for the down ones, 13.83 instead of 13.95 for
+// both, within what two runs differ by). The memory sets the speed there, not the number of threads that read.
 #define GGML_SHARE_UNIT_ROWS 16
 #define GGML_SHARE_TILE_ROWS 64 // k_x_step of mul_mat_NxM and mul_mat_up_gate_NxM
 
@@ -19415,49 +19419,6 @@ static inline void ggml_share_unit_range(int64_t r0, int64_t r1, uint32_t u, int
         *last  = *first + (int64_t)n*GGML_SHARE_UNIT_ROWS;
         *split = *last;
     }
-}
-
-// The chunks of the experts are handed out one by one (current_chunk), so the threads only wait at the end of
-// the node, for the ones that are still on their last chunk: 8% of the node with 32 threads. A thread therefore
-// takes one of the last chunks a few rows at a time and says in its slot what it has left of it, and a thread
-// that finds no chunk left takes rows from the end of those. A chunk is still one run of weights for the thread
-// that has it, read from its first row on; chunks half the size instead made the node 7% slower, every chunk
-// being a new run.
-static inline bool ggml_expert_share(const struct ggml_compute_params * params, int64_t n_tokens, int64_t n_expert) {
-    return params->shared->share && params->nth > 1 && n_tokens <= 8 && n_expert*params->nth < (1 << 20) - 1;
-}
-
-// What a thread takes at a time of a chunk of n units: a quarter for the one that has the chunk, half of that
-// for the others, so that the threads end within a few us of each other.
-static inline int ggml_expert_share_take(int64_t n_unit, bool own) {
-    const int take = MAX(1, (int)n_unit/4);
-    return own ? take : MAX(1, take/2);
-}
-
-// The expert of chunk chunk_id, and which of its chunks that is; -1 if there is no such chunk.
-static inline int ggml_expert_of_chunk(const int64_t * row_counts, int n_expert, int chunks_per_expert, int chunk_id, int * local_chunk) {
-    int acc = 0;
-    for (int a = 0; a < n_expert; a++) {
-        if (row_counts[a] == 0) continue;
-        if (chunk_id < acc + chunks_per_expert) {
-            *local_chunk = chunk_id - acc;
-            return a;
-        }
-        acc += chunks_per_expert;
-    }
-    return -1;
-}
-
-// Rows [*r0, *r1) of chunk local_chunk of an expert of n_rows rows, in kernel units of unit_rows rows: what
-// iqk_mul_mat_moe() and iqk_moe_fused_up_gate() compute for that chunk. False: too small to share.
-static inline bool ggml_expert_chunk_rows(int64_t n_rows, int64_t unit_rows, int local_chunk, int chunks_per_expert, int64_t * r0, int64_t * r1) {
-    if (unit_rows <= 0 || GGML_SHARE_UNIT_ROWS % unit_rows != 0) {
-        return false;
-    }
-    const int64_t n_unit = n_rows/unit_rows;
-    *r0 = unit_rows*(n_unit*local_chunk/chunks_per_expert);
-    *r1 = unit_rows*(n_unit*(local_chunk + 1)/chunks_per_expert);
-    return ggml_share_n_units(*r1 - *r0) >= 4;
 }
 #endif
 
@@ -19846,16 +19807,6 @@ static void ggml_compute_forward_mul_mat_id(
         atomic_store(&params->shared->current_chunk, nth);
     }
 
-#if GGML_USE_IQK_MULMAT && defined GGML_EXPERT_CHUNKING
-    // the end of the last chunks is shared between the threads, see ggml_expert_share: until a thread has said
-    // which chunk it is on, the others wait for it
-    const bool share = ne13 == 1 && dst->type == GGML_TYPE_F32 && ggml_expert_share(params, ids->ne[1], n_as);
-    void * const share_slots = params->shared->share;
-    if (share) {
-        iqk_share_close(share_slots, ith, 1);
-    }
-#endif
-
     ggml_barrier(params->shared);
 
 #if GGML_USE_IQK_MULMAT
@@ -19891,95 +19842,20 @@ static void ggml_compute_forward_mul_mat_id(
                 acc += chunks_per_expert;
             }
             if (cur_a < 0) {
-                break;
+                return;
             }
             last_a = cur_a;
             last_acc = acc;
 
             const char * src0_cur = (const char *) ggml_numa_local(src0->data, ith) + cur_a*nb02;
 
-            // One of the last chunks: in units, and what is left of it is for the others to take. Not a chunk
-            // that is not a multiple of 16 rows: iqk_mul_mat_moe() gives it to the kernel in one call when the
-            // expert has fewer tokens than there are kernels, and for 2 to 7 tokens the Q8_0_R8 kernel then
-            // takes another way for all its rows, which does not round like the one that calls of 16 rows get.
-            int64_t r0 = 0, r1 = 0;
-            if (share && chunk_id + nth >= total_chunks &&
-                ggml_expert_chunk_rows(ne01, iqk_share_unit_rows(ne01, matrix_row_counts[cur_a], ne00, src0->type, vec_dot_type),
-                        local_chunk, chunks_per_expert, &r0, &r1) && (r1 - r0) % GGML_SHARE_UNIT_ROWS == 0) {
-                const int64_t n_unit = ggml_share_n_units(r1 - r0);
-                iqk_share_open(share_slots, ith, (uint32_t)chunk_id, 0, (uint32_t)n_unit);
-                const int take = ggml_expert_share_take(n_unit, true);
-                uint32_t first = 0;
-                int64_t row[3];
-                int n, goes_on = 0;
-                while ((n = iqk_share_take(share_slots, ith, take, &first)) > 0) {
-                    ggml_share_unit_range(r0, r1, first, n, &row[0], &row[1], &row[2]);
-                    for (int part = 0; part < 2; ++part) {
-                        if (row[part + 1] <= row[part]) continue;
-                        if (!iqk_mul_mat_moe_rows(row[part], row[part + 1] - row[part], r1, goes_on,
-                                    matrix_row_counts[cur_a], ne00, ne11,
-                                    src0->type, src0_cur, nb01,
-                                    vec_dot_type, (const char *)wdata_mm, row_size_mm,
-                                    (float *)dst->data, nb1, nb2,
-                                    matrix_rows + cur_a*ne12)) GGML_ABORT("fatal error");
-                        goes_on = 1;
-                    }
-                }
-            } else {
-                if (share) {
-                    iqk_share_close(share_slots, ith, 0);
-                }
-                if (!iqk_mul_mat_moe(ne01, matrix_row_counts[cur_a], ne00, ne11,
-                            src0->type, src0_cur, nb01,
-                            vec_dot_type, (const char *)wdata_mm, row_size_mm,
-                            (float *)dst->data, nb1, nb2,
-                            matrix_rows + cur_a*ne12, local_chunk, chunks_per_expert)) goto IQK_MulMat_Not_Available0;
-            }
+            if (!iqk_mul_mat_moe(ne01, matrix_row_counts[cur_a], ne00, ne11,
+                        src0->type, src0_cur, nb01,
+                        vec_dot_type, (const char *)wdata_mm, row_size_mm,
+                        (float *)dst->data, nb1, nb2,
+                        matrix_rows + cur_a*ne12, local_chunk, chunks_per_expert)) goto IQK_MulMat_Not_Available0;
 
-            if (share) {
-                iqk_share_close(share_slots, ith, 1);
-            }
             chunk_id = atomic_fetch_add(&params->shared->current_chunk, 1);
-        }
-        if (share) {
-            // no chunk left: the end of the chunks the others are still on. A thread that has not said yet which
-            // chunk it got is asked again.
-            iqk_share_close(share_slots, ith, 0);
-            for (int again = 1, n_wait = 0; again; ) {
-                again = 0;
-                for (int k = 1; k < nth; ++k) {
-                    uint32_t chunk = 0, first = 0;
-                    int n, take = 1;
-                    while ((n = iqk_share_steal(share_slots, (ith + k)%nth, take, &chunk, &first)) != 0) {
-                        if (n < 0) {
-                            again = true;
-                            break;
-                        }
-                        int local_chunk = 0;
-                        const int a = ggml_expert_of_chunk(matrix_row_counts, n_as, chunks_per_expert, (int)chunk, &local_chunk);
-                        int64_t r0 = 0, r1 = 0, row[3];
-                        GGML_ASSERT(a >= 0);
-                        if (!ggml_expert_chunk_rows(ne01, iqk_share_unit_rows(ne01, matrix_row_counts[a], ne00, src0->type, vec_dot_type),
-                                    local_chunk, chunks_per_expert, &r0, &r1)) GGML_ABORT("fatal error");
-                        ggml_share_unit_range(r0, r1, first, n, &row[0], &row[1], &row[2]);
-                        take = ggml_expert_share_take(ggml_share_n_units(r1 - r0), false);
-                        for (int part = 0, goes_on = 0; part < 2; ++part) {
-                            if (row[part + 1] <= row[part]) continue;
-                            if (!iqk_mul_mat_moe_rows(row[part], row[part + 1] - row[part], row[2], goes_on,
-                                        matrix_row_counts[a], ne00, ne11,
-                                        src0->type, (const char *) ggml_numa_local(src0->data, ith) + a*nb02, nb01,
-                                        vec_dot_type, (const char *)wdata_mm, row_size_mm,
-                                        (float *)dst->data, nb1, nb2,
-                                        matrix_rows + a*ne12)) GGML_ABORT("fatal error");
-                            goes_on = 1;
-                        }
-                    }
-                }
-                // the thread asked for is between two chunks: a moment, unless it was taken off its processor
-                if (again && ++n_wait > 16) {
-                    sched_yield();
-                }
-            }
         }
         return;
     }
@@ -20277,14 +20153,6 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
         atomic_store(&params->shared->current_chunk, nth);
     }
 
-    // the end of the last chunks is shared between the threads, see ggml_expert_share: until a thread has said
-    // which chunk it is on, the others wait for it
-    const bool share = ggml_expert_share(params, ids->ne[1], n_as);
-    void * const share_slots = params->shared->share;
-    if (share) {
-        iqk_share_close(share_slots, ith, 1);
-    }
-
     ggml_barrier(params->shared);
 
     const float limit = *(const float *)(dst->op_params + 1);
@@ -20303,26 +20171,6 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
         if (matrix_row_counts[a] > 0) total_chunks_ug += chunks_per_expert_ug;
     }
 
-    const char *src0_1_cur, *src0_2_cur, *up_b_cur, *gate_b_cur;
-    // the weights and the biases of expert a, in the copy of the weights that is on the node of this thread
-#define MMID_UP_GATE_EXPERT(a) do { \
-        up_b_cur = gate_b_cur = NULL; \
-        if (src0_2) { \
-            src0_1_cur = (const char *) ggml_numa_local(src0_1->data, ith) + (a)*nb02; \
-            src0_2_cur = (const char *) ggml_numa_local(src0_2->data, ith) + (a)*nb02; \
-            up_b_cur   = up_b   ? (const char *)up_b->data + (a)*nb41 : NULL; \
-            gate_b_cur = gate_b ? (const char *)gate_b->data + (a)*nb51 : NULL; \
-        } else { \
-            src0_2_cur = (const char *) ggml_numa_local(src0_1->data, ith) + (a)*nb02; \
-            src0_1_cur = src0_2_cur + nb02/2; \
-            if (up_b) { \
-                GGML_ASSERT(!gate_b); \
-                gate_b_cur = (const char *)up_b->data + (a)*nb41; \
-                up_b_cur   = gate_b_cur + nb41/2; \
-            } \
-        } \
-    } while (0)
-
     int last_a = 0;
     int last_acc = 0;
     int chunk_id_ug = ith;
@@ -20338,99 +20186,36 @@ static void ggml_compute_forward_mul_mat_id_up_gate(
             acc += chunks_per_expert_ug;
         }
         if (cur_a < 0) {
-            break;
+            return;
         }
         last_a = cur_a;
         last_acc = acc;
 
-        MMID_UP_GATE_EXPERT(cur_a);
-
-        // one of the last chunks: in units, and what is left of it is for the others to take
-        int64_t r0 = 0, r1 = 0;
-        if (share && chunk_id_ug + nth >= total_chunks_ug &&
-            ggml_expert_chunk_rows(nr0_base, iqk_share_unit_rows(nr0_base, matrix_row_counts[cur_a], ne00, type, vec_dot_type),
-                    local_chunk, chunks_per_expert_ug, &r0, &r1)) {
-            const int64_t n_unit = ggml_share_n_units(r1 - r0);
-            iqk_share_open(share_slots, ith, (uint32_t)chunk_id_ug, 0, (uint32_t)n_unit);
-            const int take = ggml_expert_share_take(n_unit, true);
-            uint32_t first = 0;
-            int64_t row[3];
-            int n, goes_on = 0;
-            while ((n = iqk_share_take(share_slots, ith, take, &first)) > 0) {
-                ggml_share_unit_range(r0, r1, first, n, &row[0], &row[1], &row[2]);
-                for (int part = 0; part < 2; ++part) {
-                    if (row[part + 1] <= row[part]) continue;
-                    if (!iqk_moe_fused_up_gate_rows(row[part], row[part + 1] - row[part], r1, goes_on,
-                                        matrix_row_counts[cur_a], ne00, ne11, dst->op_params[0],
-                                        type, src0_1_cur, src0_2_cur, nb01,
-                                        vec_dot_type, (const char *)wdata_ug, row_size_ug,
-                                        up_b_cur, gate_b_cur,
-                                        (float *)dst->data, nb1, nb2,
-                                        matrix_rows + cur_a*ne12, limit, situ_beta, situ_beta_linear)) GGML_ABORT("fatal error");
-                    goes_on = 1;
-                }
-            }
+        const char *src0_1_cur, *src0_2_cur, *up_b_cur = NULL, *gate_b_cur = NULL;
+        if (src0_2) {
+            src0_1_cur = (const char *) ggml_numa_local(src0_1->data, ith) + cur_a*nb02;
+            src0_2_cur = (const char *) ggml_numa_local(src0_2->data, ith) + cur_a*nb02;
+            up_b_cur   = up_b   ? (const char *)up_b->data + cur_a*nb41 : NULL;
+            gate_b_cur = gate_b ? (const char *)gate_b->data + cur_a*nb51 : NULL;
         } else {
-            if (share) {
-                iqk_share_close(share_slots, ith, 0);
+            src0_2_cur = (const char *) ggml_numa_local(src0_1->data, ith) + cur_a*nb02;
+            src0_1_cur = src0_2_cur + nb02/2;
+            if (up_b) {
+                GGML_ASSERT(!gate_b);
+                gate_b_cur = (const char *)up_b->data + cur_a*nb41;
+                up_b_cur   = gate_b_cur + nb41/2;
             }
-            if (!iqk_moe_fused_up_gate(nr0_base, matrix_row_counts[cur_a], ne00, ne11, dst->op_params[0],
-                                type, src0_1_cur, src0_2_cur, nb01,
-                                vec_dot_type, (const char *)wdata_ug, row_size_ug,
-                                up_b_cur, gate_b_cur,
-                                (float *)dst->data, nb1, nb2,
-                                matrix_rows + cur_a*ne12, limit, situ_beta, situ_beta_linear, local_chunk, chunks_per_expert_ug)) GGML_ABORT("fatal error");
         }
 
-        if (share) {
-            iqk_share_close(share_slots, ith, 1);
-        }
+        if (!iqk_moe_fused_up_gate(nr0_base, matrix_row_counts[cur_a], ne00, ne11, dst->op_params[0],
+                            type, src0_1_cur, src0_2_cur, nb01,
+                            vec_dot_type, (const char *)wdata_ug, row_size_ug,
+                            up_b_cur, gate_b_cur,
+                            (float *)dst->data, nb1, nb2,
+                            matrix_rows + cur_a*ne12, limit, situ_beta, situ_beta_linear, local_chunk, chunks_per_expert_ug)) GGML_ABORT("fatal error");
+
         chunk_id_ug = atomic_fetch_add(&params->shared->current_chunk, 1);
     }
-
-    if (share) {
-        // no chunk left: the end of the chunks the others are still on. A thread that has not said yet which
-        // chunk it got is asked again.
-        iqk_share_close(share_slots, ith, 0);
-        for (int again = 1, n_wait = 0; again; ) {
-            again = 0;
-            for (int k = 1; k < nth; ++k) {
-                uint32_t chunk = 0, first = 0;
-                int n, take = 1;
-                while ((n = iqk_share_steal(share_slots, (ith + k)%nth, take, &chunk, &first)) != 0) {
-                    if (n < 0) {
-                        again = true;
-                        break;
-                    }
-                    int local_chunk = 0;
-                    const int a = ggml_expert_of_chunk(matrix_row_counts, n_as, chunks_per_expert_ug, (int)chunk, &local_chunk);
-                    int64_t r0 = 0, r1 = 0, row[3];
-                    GGML_ASSERT(a >= 0);
-                    if (!ggml_expert_chunk_rows(nr0_base, iqk_share_unit_rows(nr0_base, matrix_row_counts[a], ne00, type, vec_dot_type),
-                                local_chunk, chunks_per_expert_ug, &r0, &r1)) GGML_ABORT("fatal error");
-                    ggml_share_unit_range(r0, r1, first, n, &row[0], &row[1], &row[2]);
-                    take = ggml_expert_share_take(ggml_share_n_units(r1 - r0), false);
-                    MMID_UP_GATE_EXPERT(a);
-                    for (int part = 0, goes_on = 0; part < 2; ++part) {
-                        if (row[part + 1] <= row[part]) continue;
-                        if (!iqk_moe_fused_up_gate_rows(row[part], row[part + 1] - row[part], row[2], goes_on,
-                                            matrix_row_counts[a], ne00, ne11, dst->op_params[0],
-                                            type, src0_1_cur, src0_2_cur, nb01,
-                                            vec_dot_type, (const char *)wdata_ug, row_size_ug,
-                                            up_b_cur, gate_b_cur,
-                                            (float *)dst->data, nb1, nb2,
-                                            matrix_rows + a*ne12, limit, situ_beta, situ_beta_linear)) GGML_ABORT("fatal error");
-                        goes_on = 1;
-                    }
-                }
-            }
-            // the thread asked for is between two chunks: a moment, unless it was taken off its processor
-            if (again && ++n_wait > 16) {
-                sched_yield();
-            }
-        }
-    }
-#undef MMID_UP_GATE_EXPERT
 
 #else
 
@@ -20546,7 +20331,8 @@ static void ggml_compute_forward_mul_mat_up_gate(
 
     // For a few tokens the weights come from memory, and not at the same speed for every thread at every
     // moment: the threads take rows from each other as for the other matrices (see ggml_mul_mat_share_init).
-    // With each thread on its own rows only, 32 threads were busy 82% of this node for one token.
+    // With each thread on its own rows only, 32 threads were busy 83% of this node for one token; 93% this way,
+    // and the node took 2.91 ms instead of 3.09 for the 40 layers of DeepSeek-V4.1 (rhel8-b5397).
     int64_t share_rows = 0; // the rows of a kernel unit, 0: every thread keeps to its own rows
     void * const share_slots = params->shared->share;
     if (share_slots && nth > 1 && ne11 <= 8 && ne12 == 1) {

@@ -1282,16 +1282,15 @@ extern "C" IQK_API bool iqk_moe_fused_up_gate(long Nx, long Ny, long ne00, int n
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// The same sharing for the products of iqk_moe_fused_up_gate() and iqk_mul_mat_moe(): the caller hands out the
-// rows, in units of iqk_share_unit_rows() rows, and computes each range it takes with the two functions below.
+// The same sharing for the product of iqk_moe_fused_up_gate(): the caller hands out the rows, in units of its
+// own, and computes each range it takes with iqk_moe_fused_up_gate_rows().
 
 namespace {
 
 // The units a thread has left of the run it is on: [next, end) of run `id`, in one word, so that one
-// compare-and-swap takes units from either side. All bits set: the thread has not said yet what it is on.
+// compare-and-swap takes units from either side.
 constexpr int      k_run_bits    = 22;
 constexpr uint64_t k_run_mask    = (uint64_t(1) << k_run_bits) - 1;
-constexpr uint64_t k_run_pending = ~uint64_t(0);
 
 inline uint64_t run_pack(uint32_t id, uint32_t next, uint32_t end) {
     return (uint64_t)id << 2*k_run_bits | (uint64_t)next << k_run_bits | end;
@@ -1329,12 +1328,8 @@ extern "C" IQK_API int iqk_share_unit_rows(long Nx, long Ny, long ne00, int type
 }
 
 extern "C" IQK_API void iqk_share_open(void * vslots, int ith, uint32_t id, uint32_t first, uint32_t end) {
-    GGML_ASSERT(id < (1u << (64 - 2*k_run_bits)) - 1 && first <= end && end <= k_run_mask);
+    GGML_ASSERT(id < (1u << (64 - 2*k_run_bits)) && first <= end && end <= k_run_mask);
     ((ShareSlot *)vslots)[ith].range.store(run_pack(id, first, end), std::memory_order_release);
-}
-
-extern "C" IQK_API void iqk_share_close(void * vslots, int ith, int pending) {
-    ((ShareSlot *)vslots)[ith].range.store(pending ? k_run_pending : 0, std::memory_order_release);
 }
 
 extern "C" IQK_API int iqk_share_take(void * vslots, int ith, int want, uint32_t * first) {
@@ -1342,7 +1337,7 @@ extern "C" IQK_API int iqk_share_take(void * vslots, int ith, int want, uint32_t
     uint64_t r = mine.load(std::memory_order_acquire);
     for (;;) {
         const uint32_t next = run_next(r), end = run_end(r);
-        if (r == k_run_pending || next >= end) return 0;
+        if (next >= end) return 0;
         const uint32_t n = std::min<uint32_t>(std::max(1, want), end - next);
         if (mine.compare_exchange_weak(r, run_pack(run_id(r), next + n, end), std::memory_order_acq_rel, std::memory_order_acquire)) {
             *first = next;
@@ -1356,7 +1351,6 @@ extern "C" IQK_API int iqk_share_steal(void * vslots, int from, int want, uint32
     auto & theirs = ((ShareSlot *)vslots)[from].range;
     uint64_t r = theirs.load(std::memory_order_acquire);
     for (;;) {
-        if (r == k_run_pending) return -1;
         const uint32_t next = run_next(r), end = run_end(r);
         if (next >= end) return 0;
         const uint32_t n = std::min<uint32_t>(std::max(1, want), end - next);
@@ -1389,23 +1383,6 @@ extern "C" IQK_API bool iqk_moe_fused_up_gate_rows(long first_row, long n_rows, 
     auto gate_b = gate_b_c ? (const float *)gate_b_c + first_row : nullptr;
     mm.mul_mat_up_gate_NxM(ne00, (const char *)Aup + strideA*first_row, (const char *)Agate + strideA*first_row, strideA,
             up_b, gate_b, info, n_rows, Ny, unary_op, limit, situ_beta, situ_beta_linear);
-    return true;
-}
-
-extern "C" IQK_API bool iqk_mul_mat_moe_rows(long first_row, long n_rows, long run_end_row, int goes_on,
-        long Ny, long ne00, int ne11,
-        int typeA, const void * A, long strideA,
-        int typeB, const void * B, long strideB,
-        float * C, long nb1, long nb2, const void * vrow_mapping) {
-    MulMat mm;
-    if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
-        return false;
-    }
-    mm.run_end     = (const char *)A + strideA*run_end_row;
-    mm.run_goes_on = goes_on != 0;
-    DataInfo info{C + first_row, (const char *)B, nb1/sizeof(float),
-        (size_t)strideB, 0, ne11, (const mmid_row_mapping *)vrow_mapping, nb2/sizeof(float)};
-    mm.mul_mat_NxM(ne00, (const char *)A + strideA*first_row, strideA, info, n_rows, Ny);
     return true;
 }
 
@@ -3129,8 +3106,6 @@ extern "C" IQK_API int iqk_share_unit_rows(long, long, long, int, int) {
 
 extern "C" IQK_API void iqk_share_open(void *, int, uint32_t, uint32_t, uint32_t) {}
 
-extern "C" IQK_API void iqk_share_close(void *, int, int) {}
-
 extern "C" IQK_API int iqk_share_take(void *, int, int, uint32_t *) {
     return 0;
 }
@@ -3141,11 +3116,6 @@ extern "C" IQK_API int iqk_share_steal(void *, int, int, uint32_t *, uint32_t *)
 
 extern "C" IQK_API bool iqk_moe_fused_up_gate_rows(long, long, long, int, long, long, int, int, int, const void *, const void *, long,
         int, const void *, long, const char *, const char *, float *, long, long, const void *, float, float, float) {
-    return false;
-}
-
-extern "C" IQK_API bool iqk_mul_mat_moe_rows(long, long, long, int, long, long, int, int, const void *, long, int, const void *, long,
-        float *, long, long, const void *) {
     return false;
 }
 
