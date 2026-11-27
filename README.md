@@ -15,7 +15,7 @@ The same as a table:
 |---|---|---|
 | Generating, without a draft | 9.4 tokens/s | 22.9 tokens/s |
 | Generating with the DSpark draft | 25.6 tokens/s | 29.6 tokens/s (27.2 to 33.6 with the subject) |
-| Reading a prompt | 236 tokens/s | 361 tokens/s |
+| Reading a prompt | 236 tokens/s | 361 tokens/s, and 452 with `GGML_AMX_ATTN=1` (see below) |
 | Starting the server again, a conversation of 10,547 tokens | read again from its first token, 29 s (computed from the reading speed) | back from a RAM disk in 0.5 s |
 | A request larger than the context | refused, then read all the same for 6 to 7 minutes | refused at once |
 | Agents and tools | a model could not write a Metabase query | tool calls, DeepSeek's API and DeepSeek Harness work |
@@ -71,6 +71,7 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 | `T`, `TB` | one thread per physical core | threads, and threads for batches of tokens if they differ |
 | `CTX` | `131072` | context size in tokens |
 | `UBATCH` | `2048` | tokens of a prompt read together |
+| `GGML_AMX_ATTN` | off | `1` sends the attention of a prompt through Intel AMX too: a prompt of 12,616 tokens read at 452 tokens/s instead of 359. The answer to a request is then another text, see [Not measured yet](#not-measured-yet) |
 | `CACHE_DIR`, `CACHE_DISK` | empty, `120G` | folder of the saved conversations on a RAM disk (`/mnt/dscache/cache`), and the size of that RAM disk |
 | `WEBUI` | `llamacpp` | web page of the server: `llamacpp`, `auto` or `none` |
 
@@ -96,7 +97,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 |---|---|---|---|
 | Memory | One copy of the weights per socket; each thread reads the copy of its own socket | 9.4 instead of 17.1, when it came | `--numa-mirror DIR` |
 | Threads | One thread per physical core | 20.1 with one per logical CPU | `T` |
-| Weights | They are asked for ahead of their use | 18.9 | `IQK_PREFETCH=0` |
+| Weights | They are asked for ahead of their use, 4096 bytes ahead: seven other distances and cache levels were tried, none is faster | 18.9 | `IQK_PREFETCH=0` |
 | Weights | The hyper-connections of DeepSeek-V4 in one node (`hc_proj`) | 19.9 | `GGML_HC_PROJ=0` |
 | Weights | The small nodes of a graph on one thread; rows shared between threads | 21.3, 21.4 | `GGML_SERIAL_NODES=0`, `GGML_SHARE_ROWS=0` |
 | Attention | Only the rows a query sees, on a grid of threads; each token of a draft on its own rows | 19.6 | `GGML_FA_SKIP_MASKED=0` |
@@ -104,7 +105,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 | Prompt | Batches of 2048 tokens instead of 512 | 267 read | `UBATCH=512` |
 | Prompt | The matrix products of a batch through Intel AMX | 326 read | `GGML_AMX=0` |
 | Prompt | The indexer of DeepSeek-V4 in AVX-512 | 347 read | `GGML_INDEXER_512=0` |
-| Prompt | The attention of a batch through Intel AMX, on request | not measured yet | `GGML_AMX_ATTN=1` turns it on |
+| Prompt | The attention of a batch through Intel AMX, on request | 359 read, 452 with it (`rhel8-b5390`) | `GGML_AMX_ATTN=1` turns it on |
 | Server | The conversations it sets aside are files on a RAM disk: still there after a restart or a crash | read again from the first token | `--cache-ram-dir DIR`, `CACHE_DIR` |
 | Server | A request larger than the context is refused without being read | read for 6 to 7 minutes | |
 | Clients | The fields of DeepSeek's API, tool arguments as JSON Schema means them, Unsloth's chat template recognized | a model could not write a Metabase query | |
@@ -116,9 +117,8 @@ What each change does, how it was checked and what else was measured: [docs/deep
 
 ## Not measured yet
 
-- The attention of a prompt batch through Intel AMX (`GGML_AMX_ATTN=1`): built and checked against the exact result, not timed on the server, and its rounding to 8 significant bits not judged on the answers of the model.
+- What the attention through Intel AMX (`GGML_AMX_ATTN=1`) does to the answers. Its speed is measured: a prompt is read 26% faster. It rounds queries, cache rows and attention weights to 8 significant bits, 0.26% from the exact result on random numbers, and the text generated after the same prompt is another one. Whether the answers are as good has not been compared, which is why it is not the default.
 - The non-expert tensors in `Q6_K` instead of `Q8_0` (`recompresser.sh`): fewer bytes to read per token, estimated at 8 to 12% for the generation, and it changes the model.
-- Other distances for the weight prefetch (`IQK_PREFETCH=<bytes>,<far bytes>,<level>`).
 
 ## More
 

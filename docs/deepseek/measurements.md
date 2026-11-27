@@ -68,6 +68,41 @@ With `rhel8-b5317` and 32 threads, one optimization turned off at a time:
 
 Each figure is the mean of 5 runs of 200 tokens, and the runs of one build differ by up to 3%, so the 2% of the row sharing is at the limit of what this shows. The draft was accepted at 74% in these runs (68% in the run with `GGML_HC_PROJ=0`, whose text differs), so its gain depends on the text.
 
+## The attention through AMX, the prefetch distances, the experts (`rhel8-b5390`)
+
+32 threads, no draft, after a prompt of 12,616 tokens; 3 tries per pass, 2 of which read a new text. One setting changed at a time:
+
+| Setting | Prompt read, tokens/s | Generated, tokens/s (lowest and highest try) |
+|---|---|---|
+| none | 358.6 | 21.72 (21.19, 22.05) |
+| `GGML_AMX_ATTN=1` | 452.2 | 21.73 (21.48, 21.99) |
+| `IQK_PREFETCH=1024` | 352.6 | 20.37 (20.05, 20.65) |
+| `IQK_PREFETCH=16384` | 356.2 | 21.36 (21.04, 21.56) |
+| `IQK_PREFETCH=4096,32768` | 357.5 | 21.46 (21.18, 21.70) |
+| `IQK_PREFETCH=4096,131072` | 357.7 | 20.90 (20.59, 21.28) |
+| `IQK_PREFETCH=1024,16384` | 354.6 | 21.42 (21.15, 21.68) |
+| `IQK_PREFETCH=16384,0,1` | 357.1 | 21.66 (21.55, 21.78) |
+| `IQK_PREFETCH=65536,0,1` | 351.7 | 20.66 (20.46, 20.79) |
+
+After a short prompt the same build generates 22.78 tokens/s (22.52, 22.99).
+
+**The attention through AMX** reads the prompt 26% faster, and the two readings agree (452.18 and 452.25). In the profile a batch graph, 1679 tokens on average, takes 3659 ms instead of 4648, and its attention 567 ms instead of 1559, 2.75 times less. The generation does not move: a token generated alone does not go this way. The text generated after the same prompt is another one, where the seven passes with another prefetch setting all give the text of the reference, character for character. That is what a change of rounding does, and it says nothing about which text is better: that comparison has not been made.
+
+What a batch is made of once the attention goes through AMX:
+
+| Part of a batch graph | ms | Share |
+|---|---|---|
+| The experts: `ffn_up_exps` with its gate, then `ffn_down_exps` | 1024 + 566 | 43.5% |
+| The `Q8_0` matrices that go through AMX (`attn_q_a`, `attn_q_b`, `attn_kv`, `attn_output_a`, `attn_output_b`, `ffn_down_shexp`, `engram_kv`) | 634 | 17.3% |
+| The attention | 567 | 15.5% |
+| Up and gate of the shared expert (`ffn_up_shexp`), not through AMX | 158 | 4.3% |
+| The `f32` matrices (`ffn_gate_inp`, `hc_attn_fn`, `hc_ffn_fn`) | 200 | 5.5% |
+| Everything else (norms, hyper-connections, indexer, RoPE...) | 510 | 13.9% |
+
+**The prefetch**: the kernels ask for the weights 4096 bytes ahead, into the L1 cache. No other setting is faster. Asking nearer (1024), much farther (65536), or a second time from 131072 bytes ahead loses 4 to 6%; the four others are within the 3% that the runs of one build differ by. Requests sent to the L2 cache (`16384,0,1`) give the same speed as the default, so nothing here shows that a core can be made to read more than it does.
+
+**The experts**, with the count of this build (an expert that several tokens picked is counted once): for a token alone the up and gate matrices are read at 326 GB/s and the down matrices at 320; for the 5 tokens that end a prompt, at 351 and 337 GB/s. The 543 GB/s that the profile of `rhel8-b5379` showed when a draft is verified came from counting an expert once per token. For comparison `output.weight`, one matrix of 0.7 GB read from end to end, is read at 450 GB/s.
+
 ## Where the time goes
 
 ```
