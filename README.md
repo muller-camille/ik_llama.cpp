@@ -29,9 +29,9 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 1. Take the package of the [latest release](https://github.com/muller-camille/ik_llama.cpp/releases/latest). Nothing has to be installed:
 
    ```
-   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5390/ik_llama-rhel8-b5390-bin-rhel8-x64.tar.gz
-   tar xzf ik_llama-rhel8-b5390-bin-rhel8-x64.tar.gz
-   cd ik_llama-rhel8-b5390
+   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5396/ik_llama-rhel8-b5396-bin-rhel8-x64.tar.gz
+   tar xzf ik_llama-rhel8-b5396-bin-rhel8-x64.tar.gz
+   cd ik_llama-rhel8-b5396
    ```
 
 2. Repack the model files once, and the drafter. The repacked files are the ones the server maps from the RAM disks:
@@ -99,7 +99,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 | Threads | One thread per physical core | 20.1 with one per logical CPU | `T` |
 | Weights | They are asked for ahead of their use, 4096 bytes ahead: seven other distances and cache levels were tried, none is faster | 18.9 | `IQK_PREFETCH=0` |
 | Weights | The hyper-connections of DeepSeek-V4 in one node (`hc_proj`) | 19.9 | `GGML_HC_PROJ=0` |
-| Weights | The small nodes of a graph on one thread; rows shared between threads | 21.3, 21.4 | `GGML_SERIAL_NODES=0`, `GGML_SHARE_ROWS=0` |
+| Weights | The small nodes of a graph on one thread; rows shared between threads (since `rhel8-b5396` in the shared expert and in the routed experts too, not measured yet) | 21.3, 21.4 | `GGML_SERIAL_NODES=0`, `GGML_SHARE_ROWS=0` |
 | Attention | Only the rows a query sees, on a grid of threads; each token of a draft on its own rows | 19.6 | `GGML_FA_SKIP_MASKED=0` |
 | Attention | The cache of DeepSeek-V4 read in its two parts, not copied together | 21.1 | `GGML_LAZY_CONCAT=0` |
 | Prompt | Batches of 2048 tokens instead of 512 | 267 read | `UBATCH=512` |
@@ -117,6 +117,7 @@ What each change does, how it was checked and what else was measured: [docs/deep
 
 ## Not measured yet
 
+- The rows shared between threads in the shared expert and in the routed experts (`rhel8-b5396`): the values are checked to be the same bit for bit, the gain is not timed on the server. From the profile of `rhel8-b5390`, up to 1 ms of the 45.5 ms of a token.
 - What the attention through Intel AMX (`GGML_AMX_ATTN=1`) does to the answers. Its speed is measured: a prompt is read 26% faster. It rounds queries, cache rows and attention weights to 8 significant bits, 0.26% from the exact result on random numbers, and the text generated after the same prompt is another one. Whether the answers are as good has not been compared, which is why it is not the default.
 - The non-expert tensors in `Q6_K` instead of `Q8_0` (`recompresser.sh`): fewer bytes to read per token, estimated at 8 to 12% for the generation, and it changes the model.
 

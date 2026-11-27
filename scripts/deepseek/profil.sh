@@ -46,9 +46,10 @@
 #                les produits des matrices Q8_0_R8 par un lot de tokens reprennent les noyaux AVX-512 ;
 #              - GGML_AMX_ATTN=1 fait passer aussi l'attention d'un lot de tokens par les tuiles AMX : c'est
 #                le seul réglage de la liste qui ajoute quelque chose au lieu de le couper. Il n'est pas
-#                encore celui de deepseek.sh : cette passe dit ce qu'il donne (ligne « texte lu », et
-#                FLASH_ATTN_EXT dans le chronométrage). Les requêtes, les lignes du cache et les poids de
-#                l'attention y sont arrondis à 8 bits significatifs (bf16) ;
+#                celui de deepseek.sh : cette passe dit ce qu'il donne (ligne « texte lu », et
+#                FLASH_ATTN_EXT dans le chronométrage ; 452 tokens/s lus au lieu de 359 avec rhel8-b5390
+#                sur 2 x 16 cœurs). Les requêtes, les lignes du cache et les poids de l'attention y sont
+#                arrondis à 8 bits significatifs (bf16), et le texte produit n'est plus le même ;
 #              - GGML_INDEXER_512=0 reprend l'ancien indexeur à la place de celui en AVX-512 ;
 #              - GGML_FA_ROW_GROUPS=-1 tire au sort la grille de threads de l'attention à chaque nœud, et le
 #                chronométrage dit ce que chacune a coûté (les tokens/s de ces passes ne se comparent donc
