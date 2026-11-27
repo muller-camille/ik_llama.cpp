@@ -123,7 +123,37 @@ After a short prompt: 3.22 to 3.08 ms for the shared expert, 9.19 to 9.09 and 4.
 - **The values are the same**: the texts have the fingerprints of `rhel8-b5390`, with the sharing and without it.
 - **The attention through AMX**, on in every pass of this run: the prompt read at 455.0 and 454.2 tokens/s (452.2 with `rhel8-b5390`).
 
-Not explained: in the graphs of 5 tokens that end a prompt (2 to 6 per pass), one thread was held up 25 to 65 ms in an expert node, once in each of the three passes, with the sharing on and with it off; the threads were then busy 46 to 86% of that node instead of 97%. None of the ten passes of the run of `rhel8-b5390` shows it in these graphs, where single nodes of the graphs of one token do show such delays (a node at 90% instead of 96 in one pass). With so few graphs it can be chance; the graphs a draft is verified with are of this kind, and a run with the draft has hundreds of them.
+Not explained: in the graphs of 5 tokens that end a prompt (2 to 6 per pass), one thread was held up 25 to 65 ms in an expert node, once in each of the three passes, with the sharing on and with it off; the threads were then busy 46 to 86% of that node instead of 97%. None of the ten passes of the run of `rhel8-b5390` shows it in these graphs, where single nodes of the graphs of one token do show such delays (a node at 90% instead of 96 in one pass). With so few graphs it can be chance; the graphs a draft is verified with are of this kind, and a run with the draft has hundreds of them. The run of `rhel8-b5399` with the draft, below, answers it: it is the machine, not this code.
+
+## The settings of the draft (`rhel8-b5399`)
+
+32 threads, with the DSpark draft, after a short prompt; 5 tries of 200 tokens per pass, each on another subject. The drafter proposes up to `n_max` tokens and stops at the first one it is less than `p_min` sure of, 0.75 when nothing is said:
+
+| `--spec-type` | Tokens/s (lowest, highest try) | Proposed per step | Accepted | Produced per step | A step |
+|---|---|---|---|---|---|
+| `dspark:n_max=4`, as `deepseek.sh` starts it | 30.42 (27.99, 34.43) | 2.16 | 62% | 2.35 | 78.2 ms |
+| `dspark:n_max=4,p_min=0.5` | 30.80 (28.58, 33.67) | 2.92 | 53% | 2.58 | 83.9 ms |
+| `dspark:n_max=4,p_min=0.3` | 30.05 (24.89, 32.73) | 3.67 | 46% | 2.68 | 89.6 ms |
+| `dspark:n_max=4,p_min=0` | 30.60 (28.80, 31.92) | 4.00 | 45% | 2.82 | 92.4 ms |
+| `dspark:n_max=5,p_min=0.3` | 30.12 (27.53, 32.93) | 4.38 | 44% | 2.94 | 98.0 ms |
+| `dspark:n_max=5,p_min=0` | 28.76 (26.38, 31.22) | 5.00 | 38% | 2.91 | 101.7 ms |
+
+- **No setting is faster than the one in use.** The four nearest are within 1.2%, where a difference of less than 1 token/s between two passes with the draft says nothing; 5 tokens without a threshold is 5.5% slower.
+- **Why**: a lower threshold gives more tokens per step and a step that is longer by as much. One more proposed token costs 7.5 to 8.5 ms of verification, a produced token is 33 ms of a step, so it pays when it is accepted more than about one time in four; the tokens the drafter is less than 75% sure of are accepted 15 to 30% of the time.
+- The setting of `deepseek.sh` stays.
+
+What a step is made of, in the pass of the setting in use (406 steps):
+
+| Part of a step | ms |
+|---|---|
+| The verification of the proposed tokens: 37 layers, 3.2 tokens per graph, of which 26.7 ms for the routed experts | 60.9 |
+| The last 3 layers, in three graphs of their own, the last one with the logits | 6.9 |
+| The drafter: its 3 layers, its logits, and what it takes from the model | 6.8 |
+| Outside the graphs: the sampling, the cache, the server | 3.7 |
+
+The output matrix (0.7 GB) is read twice in a step, for the logits of the model and for those of the drafter: 3.3 ms.
+
+**The threads held up in the run of `rhel8-b5397`.** In the 337 to 415 graphs of several tokens of each pass, every thread is busy 95 to 97% of the two nodes of the routed experts: none is held up there. The same pattern, one thread at work and the others waiting, does show in other nodes of some passes: the matrix through which the drafter takes the state of the model (`fc.weight`, busy 63 and 70% in two passes instead of 91 to 95), `attn_q_b` in the small graphs of one pass (60% instead of 95), the shared expert in one pass (84% instead of 92). One thread each time, the same one in two passes. So something on the machine takes a core away for some tens of ms now and then, whatever node the thread is in; it costs about half a percent of a pass at most.
 
 ## Where the time goes
 
