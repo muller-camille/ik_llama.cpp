@@ -414,6 +414,24 @@ struct server_prompt_checkpoint {
 };
 
 
+// What a server was started with that decides whether the state of a prompt can be taken back by another one:
+// the state fits any context that has room for it, but the number of slots, and for some models the size of
+// the batches, are part of how it is laid out. 0: the file does not say.
+struct server_prompt_settings {
+    uint32_t n_ctx      = 0;
+    uint32_t n_ubatch   = 0;
+    uint32_t n_parallel = 0;
+    uint32_t n_ctx_slot() const {
+        return n_ctx / (n_parallel > 0 ? n_parallel : 1);
+    }
+    // whether a file written with `other` comes from a server set up in another way, as far as it says
+    bool differs(const server_prompt_settings & other) const {
+        return (other.n_ctx      != 0 && other.n_ctx      != n_ctx) ||
+               (other.n_ubatch   != 0 && other.n_ubatch   != n_ubatch) ||
+               (other.n_parallel != 0 && other.n_parallel != n_parallel);
+    }
+};
+
 struct server_prompt {
     server_tokens tokens;
     int n_kept_prompt;
@@ -429,6 +447,8 @@ struct server_prompt {
     server_prompt_store::entry file;
     // the last position of the state in the file, to check what comes back from it (-1: not known)
     llama_pos file_pos_max = -1;
+    // the settings of the server that wrote the file
+    server_prompt_settings file_settings;
     // The slot that took this prompt back from its file. The file stays, so that the prompt is not lost if the
     // server dies, until that slot writes a newer state of the same conversation. -1: no slot has it.
     int held_by = -1;
@@ -503,7 +523,13 @@ struct server_prompt_cache {
     std::unique_ptr<server_prompt_store> store;
 
     // Opens the directory and takes the prompts that are there for this model. False: the cache stays in memory.
-    bool open_store(const std::string & dir, const std::string & model_fingerprint);
+    // The context size is not part of the model: a prompt written with another one is taken when it fits in
+    // the context of a slot, and left in the directory when it does not. `earlier` are the fingerprints an
+    // earlier version of the server gave the files of this model, each with the context size it stood for.
+    bool open_store(const std::string & dir, const std::string & model_fingerprint,
+                    const std::vector<std::pair<std::string, uint32_t>> & earlier, const server_prompt_settings & settings);
+    // the settings of this server, written with every file
+    server_prompt_settings store_settings;
 
     // The prompt of slot id_slot goes to a file. fill gets the place of the state_size bytes of the state and says
     // whether it put them there; pos_max is the last position of that state. When the directory has no room, the

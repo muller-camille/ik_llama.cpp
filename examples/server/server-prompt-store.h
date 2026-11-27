@@ -60,10 +60,14 @@ struct server_prompt_store {
         uint64_t state_size = 0;
         uint64_t ckpt_size  = 0; // bytes of the checkpoints, without their headers
         uint64_t n_ckpt     = 0;
+        uint64_t fingerprint = 0; // the one in the file: this model's, or one of `also_read`
     };
 
     std::string dir;
     uint64_t    fingerprint = 0; // of the model: files with another one are left alone
+    // Other fingerprints whose files are this model's too: read and removed like the others, never written.
+    // (An earlier version of the server made the fingerprint of more than the model.)
+    std::vector<uint64_t> also_read;
     uint64_t    next_seq    = 1;
     std::string error;           // why the last call failed
     bool        no_room = false; // the last write failed for lack of room in the directory
@@ -102,11 +106,12 @@ struct server_prompt_store {
 
     // The directory is made if it is not there, for this account only: the files hold conversations. It has to
     // belong to this account, with nobody else allowed to write in it, and no other server may be using it.
-    bool open(const std::string & directory, uint64_t model_fingerprint) {
+    bool open(const std::string & directory, uint64_t model_fingerprint, const std::vector<uint64_t> & also = {}) {
         begin();
         dir = directory;
         while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
         fingerprint = model_fingerprint;
+        also_read = also;
         if (dir.empty()) return fail("no directory");
         for (size_t i = 1; i <= dir.size(); ++i) {
             if (i < dir.size() && dir[i] != '/') continue;
@@ -139,7 +144,6 @@ struct server_prompt_store {
         begin();
         DIR * d = opendir(dir.c_str());
         if (!d) { fail("cannot list " + dir); return found; }
-        const std::string mine = prefix();
         while (const dirent * de = readdir(d)) {
             const std::string name = de->d_name;
             if (name.size() < 8 || name.compare(0, 2, "p-") != 0) continue;
@@ -149,6 +153,8 @@ struct server_prompt_store {
             if (!ends_with(name, ".ikpc")) continue;
             entry e;
             const int r = read_entry(path, e);
+            // the name of a file says the fingerprint that is in it
+            const std::string mine = r == 0 ? "p-" + hex(e.fingerprint) + "-" : std::string();
             if (r == 0 && name.compare(0, mine.size(), mine) == 0) found.push_back(std::move(e));
             else if (r == 0 || r == 1) ++n_other;
             else ++n_bad;
@@ -215,7 +221,7 @@ struct server_prompt_store {
         ++next_seq;
         out = entry();
         out.path = path; out.meta = meta; out.seq = h.seq; out.state_off = h.state_off; out.state_size = state_size;
-        out.ckpt_size = h.ckpt_size; out.n_ckpt = h.n_ckpt;
+        out.ckpt_size = h.ckpt_size; out.n_ckpt = h.n_ckpt; out.fingerprint = fingerprint;
         return true;
     }
 
@@ -362,13 +368,13 @@ private:
             uint32_t end = 0;
             if (h.state_off + h.state_size + h.n_ckpt*sizeof(ckpt_record) + h.ckpt_size + sizeof(end) == h.total_size &&
                 get(fd, &end, sizeof(end), h.total_size - sizeof(end)) && end == k_end) {
-                if (h.fingerprint != fingerprint) {
+                if (h.fingerprint != fingerprint && std::find(also_read.begin(), also_read.end(), h.fingerprint) == also_read.end()) {
                     r = 1;
                 } else {
                     e.meta.resize(h.meta_size);
                     if (get(fd, &e.meta[0], h.meta_size, sizeof(h))) {
                         e.path = path; e.seq = h.seq; e.state_off = h.state_off; e.state_size = h.state_size;
-                        e.ckpt_size = h.ckpt_size; e.n_ckpt = h.n_ckpt;
+                        e.ckpt_size = h.ckpt_size; e.n_ckpt = h.n_ckpt; e.fingerprint = h.fingerprint;
                         r = 0;
                     }
                 }
@@ -380,7 +386,7 @@ private:
 
 #else // not POSIX: the cache stays in the memory of the server
 
-    bool open(const std::string &, uint64_t) { error = "not available on this system"; return false; }
+    bool open(const std::string &, uint64_t, const std::vector<uint64_t> & = {}) { error = "not available on this system"; return false; }
     std::vector<entry> scan(size_t & n_other, size_t & n_bad) { n_other = n_bad = 0; return {}; }
     bool write(const std::string &, size_t, const std::function<bool(uint8_t *)> &, const std::vector<ckpt_in> &, entry &) { return false; }
     const uint8_t * map_state(const entry &) { return nullptr; }

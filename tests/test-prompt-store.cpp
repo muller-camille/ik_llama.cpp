@@ -178,6 +178,49 @@ int main() {
         check(ok, "and the conversations of the first model are as they were");
     }
 
+    // The same model under a new fingerprint (the server no longer makes the context size part of it): told the
+    // earlier one, a store finds the files written under it, reads them, and writes under its own.
+    {
+        const uint64_t renamed = server_prompt_store::hash("model A|any context|5120");
+        conversation c = make(1500, 2);
+        {
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = store.open(dir, renamed, { model });
+            auto found = store.scan(n_other, n_bad);
+            ok = ok && found.size() == all.size() && n_other == 0 && n_bad == 0;
+            for (size_t i = 0; ok && i < found.size(); ++i) ok = found[i].fingerprint == model && same(store, found[i], all[i]);
+            check(ok, "a store that is told an earlier fingerprint of its model finds the files written under it and reads the same bytes");
+            char want[40];
+            snprintf(want, sizeof(want), "/p-%016llx-", (unsigned long long)renamed);
+            ok = write(store, c) && c.entry.fingerprint == renamed && c.entry.seq > all.back().entry.seq &&
+                 c.entry.path.find(want) != std::string::npos && same(store, c.entry, c);
+            check(ok, "what it writes is newer than those, and goes under its own fingerprint");
+        }
+        {
+            // at the next start: all of them, the old ones first
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = store.open(dir, renamed, { model });
+            auto found = store.scan(n_other, n_bad);
+            ok = ok && found.size() == all.size() + 1 && n_other == 0 && n_bad == 0 &&
+                 found.back().fingerprint == renamed && same(store, found.back(), c);
+            check(ok, "at the next start it finds both kinds, the newest last");
+            // the old ones are removed like its own
+            store.remove(found.back());
+            check(count_files(dir) == all.size(), "and removes the one it wrote");
+        }
+        {
+            // a store that is not told the earlier fingerprint leaves them alone
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = store.open(dir, renamed);
+            auto found = store.scan(n_other, n_bad);
+            check(ok && found.empty() && n_other == all.size() && count_files(dir) == all.size(),
+                  "a store that is not told the earlier fingerprint takes none of them");
+        }
+    }
+
     // files that are not conversations, or not whole
     {
         const std::string unfinished = dir + "/p-00000000000000aa.ikpc.tmp", cut = dir + "/p-00000000000000ab.ikpc",

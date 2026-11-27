@@ -29,9 +29,9 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 1. Take the package of the [latest release](https://github.com/muller-camille/ik_llama.cpp/releases/latest). Nothing has to be installed:
 
    ```
-   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5399/ik_llama-rhel8-b5399-bin-rhel8-x64.tar.gz
-   tar xzf ik_llama-rhel8-b5399-bin-rhel8-x64.tar.gz
-   cd ik_llama-rhel8-b5399
+   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5403/ik_llama-rhel8-b5403-bin-rhel8-x64.tar.gz
+   tar xzf ik_llama-rhel8-b5403-bin-rhel8-x64.tar.gz
+   cd ik_llama-rhel8-b5403
    ```
 
 2. Repack the model files once, and the drafter. The repacked files are the ones the server maps from the RAM disks:
@@ -72,7 +72,7 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 | `CTX` | `131072` | context size in tokens |
 | `UBATCH` | `2048` | tokens of a prompt read together |
 | `GGML_AMX_ATTN` | off | `1` sends the attention of a prompt through Intel AMX too: a prompt of 12,616 tokens read at 452 tokens/s instead of 359. The answer to a request is then another text, see [Not measured yet](#not-measured-yet) |
-| `CACHE_DIR`, `CACHE_DISK` | empty, `120G` | folder of the saved conversations on a RAM disk (`/mnt/dscache/cache`), and the size of that RAM disk |
+| `CACHE_DIR`, `CACHE_DISK` | empty, `120G` | folder of the saved conversations on a RAM disk (`/mnt/dscache/cache`), and the size of that RAM disk. The conversations are found again after a restart of the server, with another `CTX` too if they fit in it; not after a reboot of the machine |
 | `WEBUI` | `llamacpp` | web page of the server: `llamacpp`, `auto` or `none` |
 
 What a package holds, every script, and the same setup by hand: [docs/deepseek/setup.md](docs/deepseek/setup.md). DeepSeek's own agent on this server: [docs/deepseek/harness.md](docs/deepseek/harness.md).
@@ -107,7 +107,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 | Prompt | The matrix products of a batch through Intel AMX | 326 read | `GGML_AMX=0` |
 | Prompt | The indexer of DeepSeek-V4 in AVX-512 | 347 read | `GGML_INDEXER_512=0` |
 | Prompt | The attention of a batch through Intel AMX, on request | 359 read, 452 with it (`rhel8-b5390`) | `GGML_AMX_ATTN=1` turns it on |
-| Server | The conversations it sets aside are files on a RAM disk: still there after a restart or a crash | read again from the first token | `--cache-ram-dir DIR`, `CACHE_DIR` |
+| Server | The conversations it sets aside are files on a RAM disk: still there after a restart or a crash, and after a change of the context size | read again from the first token | `--cache-ram-dir DIR`, `CACHE_DIR` |
 | Server | A request larger than the context is refused without being read | read for 6 to 7 minutes | |
 | Clients | The fields of DeepSeek's API, tool arguments as JSON Schema means them, Unsloth's chat template recognized | a model could not write a Metabase query | |
 | Loading | The GGUF files of upstream llama.cpp load as they are, engram table and DSpark draft included | | |
