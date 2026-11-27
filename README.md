@@ -29,9 +29,9 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 1. Take the package of the [latest release](https://github.com/muller-camille/ik_llama.cpp/releases/latest). Nothing has to be installed:
 
    ```
-   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5403/ik_llama-rhel8-b5403-bin-rhel8-x64.tar.gz
-   tar xzf ik_llama-rhel8-b5403-bin-rhel8-x64.tar.gz
-   cd ik_llama-rhel8-b5403
+   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5404/ik_llama-rhel8-b5404-bin-rhel8-x64.tar.gz
+   tar xzf ik_llama-rhel8-b5404-bin-rhel8-x64.tar.gz
+   cd ik_llama-rhel8-b5404
    ```
 
 2. Repack the model files once, and the drafter. The repacked files are the ones the server maps from the RAM disks:
@@ -72,7 +72,7 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 | `CTX` | `131072` | context size in tokens |
 | `UBATCH` | `2048` | tokens of a prompt read together |
 | `GGML_AMX_ATTN` | off | `1` sends the attention of a prompt through Intel AMX too: a prompt of 12,616 tokens read at 452 tokens/s instead of 359. The answer to a request is then another text, see [Not measured yet](#not-measured-yet) |
-| `CACHE_DIR`, `CACHE_DISK` | empty, `120G` | folder of the saved conversations on a RAM disk (`/mnt/dscache/cache`), and the size of that RAM disk. The conversations are found again after a restart of the server, with another `CTX` too if they fit in it; not after a reboot of the machine |
+| `CACHE_DIR`, `CACHE_DISK` | empty, `120G` | folder of the saved conversations on a RAM disk (`/mnt/dscache/cache`), and the size of that RAM disk. The conversations are found again after a restart of the server, with another `CTX` too if they fit in it and `UBATCH` is the same; not after a reboot of the machine |
 | `WEBUI` | `llamacpp` | web page of the server: `llamacpp`, `auto` or `none` |
 
 What a package holds, every script, and the same setup by hand: [docs/deepseek/setup.md](docs/deepseek/setup.md). DeepSeek's own agent on this server: [docs/deepseek/harness.md](docs/deepseek/harness.md).

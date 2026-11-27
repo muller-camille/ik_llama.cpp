@@ -21,6 +21,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
@@ -61,6 +62,7 @@ struct server_prompt_store {
         uint64_t ckpt_size  = 0; // bytes of the checkpoints, without their headers
         uint64_t n_ckpt     = 0;
         uint64_t fingerprint = 0; // the one in the file: this model's, or one of `also_read`
+        int64_t  written_ns  = 0; // the date of the file, in ns
     };
 
     std::string dir;
@@ -112,6 +114,7 @@ struct server_prompt_store {
         while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
         fingerprint = model_fingerprint;
         also_read = also;
+        std::sort(also_read.begin(), also_read.end());
         if (dir.empty()) return fail("no directory");
         for (size_t i = 1; i <= dir.size(); ++i) {
             if (i < dir.size() && dir[i] != '/') continue;
@@ -160,9 +163,37 @@ struct server_prompt_store {
             else ++n_bad;
         }
         closedir(d);
-        std::sort(found.begin(), found.end(), [] (const entry & a, const entry & b) { return a.seq < b.seq; });
         for (const auto & e : found) next_seq = std::max(next_seq, e.seq + 1);
-        return found;
+        return by_age(std::move(found));
+    }
+
+    // The oldest first. Under one fingerprint the numbers say the order of writing. The files of several
+    // fingerprints (`also_read`: each was numbered from 1) are put among each other by their dates, each
+    // fingerprint keeping its own order.
+    static std::vector<entry> by_age(std::vector<entry> found) {
+        std::sort(found.begin(), found.end(), [] (const entry & a, const entry & b) {
+            return a.fingerprint != b.fingerprint ? a.fingerprint < b.fingerprint : a.seq < b.seq;
+        });
+        std::vector<std::pair<size_t, size_t>> runs; // the files of one fingerprint: next one, end
+        for (size_t i = 0; i < found.size(); ++i) {
+            if (i == 0 || found[i].fingerprint != found[i - 1].fingerprint) runs.emplace_back(i, i);
+            runs.back().second = i + 1;
+        }
+        if (runs.size() < 2) return found;
+        std::vector<entry> sorted;
+        sorted.reserve(found.size());
+        while (sorted.size() < found.size()) {
+            size_t best = runs.size();
+            for (size_t r = 0; r < runs.size(); ++r) {
+                if (runs[r].first == runs[r].second) continue;
+                if (best == runs.size()) { best = r; continue; }
+                const entry & a = found[runs[r].first];
+                const entry & b = found[runs[best].first];
+                if (a.written_ns < b.written_ns || (a.written_ns == b.written_ns && a.seq < b.seq)) best = r;
+            }
+            sorted.push_back(std::move(found[runs[best].first++]));
+        }
+        return sorted;
     }
 
     // Writes a conversation. fill is given the place of the state_size bytes of the state, and says whether it
@@ -212,6 +243,8 @@ struct server_prompt_store {
         }
         const uint32_t end = k_end;
         ok = ok && put(fd, &end, sizeof(end), at);
+        struct stat st;
+        const int64_t written_ns = fstat(fd, &st) == 0 ? ns_of(st) : 0;
         ok = (::close(fd) == 0) && ok;
         // its name, unless another file took it meanwhile: never in the place of a file
         ok = ok && link(tmp.c_str(), path.c_str()) == 0;
@@ -222,6 +255,7 @@ struct server_prompt_store {
         out = entry();
         out.path = path; out.meta = meta; out.seq = h.seq; out.state_off = h.state_off; out.state_size = state_size;
         out.ckpt_size = h.ckpt_size; out.n_ckpt = h.n_ckpt; out.fingerprint = fingerprint;
+        out.written_ns = written_ns;
         return true;
     }
 
@@ -352,6 +386,13 @@ private:
         }
         return true;
     }
+    static int64_t ns_of(const struct stat & st) {
+#if defined(__APPLE__)
+        return (int64_t)st.st_mtimespec.tv_sec*1000000000 + (int64_t)st.st_mtimespec.tv_nsec;
+#else
+        return (int64_t)st.st_mtim.tv_sec*1000000000 + (int64_t)st.st_mtim.tv_nsec;
+#endif
+    }
     // 0: a conversation of this model, 1: of another model, 2: not readable, or not a file of this account
     int read_entry(const std::string & path, entry & e) {
         const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -368,13 +409,14 @@ private:
             uint32_t end = 0;
             if (h.state_off + h.state_size + h.n_ckpt*sizeof(ckpt_record) + h.ckpt_size + sizeof(end) == h.total_size &&
                 get(fd, &end, sizeof(end), h.total_size - sizeof(end)) && end == k_end) {
-                if (h.fingerprint != fingerprint && std::find(also_read.begin(), also_read.end(), h.fingerprint) == also_read.end()) {
+                if (h.fingerprint != fingerprint && !std::binary_search(also_read.begin(), also_read.end(), h.fingerprint)) {
                     r = 1;
                 } else {
                     e.meta.resize(h.meta_size);
                     if (get(fd, &e.meta[0], h.meta_size, sizeof(h))) {
                         e.path = path; e.seq = h.seq; e.state_off = h.state_off; e.state_size = h.state_size;
                         e.ckpt_size = h.ckpt_size; e.n_ckpt = h.n_ckpt; e.fingerprint = h.fingerprint;
+                        e.written_ns = ns_of(st);
                         r = 0;
                     }
                 }

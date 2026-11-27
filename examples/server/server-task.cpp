@@ -1109,6 +1109,9 @@ bool server_prompt_cache::load(server_prompt& prompt, const server_tokens& token
 
     // find the most similar cached prompt, that would also preserve the most context
     for (auto it = states.begin(); it != states.end(); ++it) {
+        if (it->not_here) {
+            continue; // its file did not come back in this server
+        }
         server_tokens tokens;
         if (think_tokens.exclude) {
             tokens = it->tokens.get_tokens_exclude_think(ctx, think_tokens);
@@ -1169,12 +1172,13 @@ bool server_prompt_cache::load(server_prompt& prompt, const server_tokens& token
             prompt.n_kept_prompt = 0;
             prompt.n_discarded_prompt = 0;
             if (store_settings.differs(it_best->file_settings)) {
-                // written by a server that was set up in another way, where it may still be good: the file
-                // stays, and this server does not try it again
+                // Written by a server that was set up in another way, where it may still be good: the file
+                // stays and this server does not try it again. It goes like any other: when this server has
+                // written a newer state of the conversation, or when room is needed.
                 const auto & f = it_best->file_settings;
-                LLAMA_LOG_WARN(" - it was written by a server with a context of %u tokens, batches of %u and %u slot(s), this one has %u, %u and %u: the file is left in %s\n",
+                LLAMA_LOG_WARN(" - it was written by a server with a context of %u tokens, batches of %u and %u slot(s) (0: not said), this one has %u, %u and %u: the file stays in %s and is not tried again by this server\n",
                     f.n_ctx, f.n_ubatch, f.n_parallel, store_settings.n_ctx, store_settings.n_ubatch, store_settings.n_parallel, store->dir.c_str());
-                states.erase(it_best);
+                it_best->not_here = true;
             } else {
                 erase(it_best);
             }
@@ -1261,17 +1265,18 @@ void server_prompt_cache::clear() {
 }
 
 bool server_prompt_cache::open_store(const std::string & dir, const std::string & model_fingerprint,
-        const std::vector<std::pair<std::string, uint32_t>> & earlier, const server_prompt_settings & settings) {
+        const std::vector<std::pair<uint64_t, uint32_t>> & earlier, const server_prompt_settings & settings) {
     auto s = std::make_unique<server_prompt_store>();
     std::vector<uint64_t> also;
     for (const auto & f : earlier) {
-        also.push_back(server_prompt_store::hash(f.first));
+        also.push_back(f.first);
     }
     if (!s->open(dir, server_prompt_store::hash(model_fingerprint), also)) {
         LLAMA_LOG_WARN("prompt cache: %s: it stays in the memory of the server\n", s->error.c_str());
         return false;
     }
-    size_t n_other = 0, n_bad = 0, n_unread = 0, n_long = 0, n_other_ctx = 0;
+    size_t n_other = 0, n_bad = 0, n_unread = 0, n_long = 0, n_setup = 0, n_other_ctx = 0;
+    uint64_t size_long = 0, size_setup = 0;
     auto found = s->scan(n_other, n_bad);
     store = std::move(s);
     store_settings = settings;
@@ -1295,15 +1300,23 @@ bool server_prompt_cache::open_store(const std::string & dir, const std::string 
             continue;
         }
         // a file of an earlier version does not say its context size: its fingerprint does
-        for (size_t i = 0; cur.file_settings.n_ctx == 0 && i < also.size(); ++i) {
-            if (also[i] == e.fingerprint) {
+        for (size_t i = 0; cur.file_settings.n_ctx == 0 && i < earlier.size(); ++i) {
+            if (earlier[i].first == e.fingerprint) {
                 cur.file_settings.n_ctx = earlier[i].second;
             }
         }
+        const uint64_t file_size = e.state_size + e.ckpt_size; // as server_prompt::size() counts it
         // A prompt that is longer than the context of a slot cannot come back here: its file is left for a
         // server with a larger context.
         if (std::max<int64_t>(cur.n_tokens(), (int64_t)cur.file_pos_max + 1) > (int64_t)n_ctx_slot) {
             ++n_long;
+            size_long += file_size;
+            continue;
+        }
+        // nor one that says it was written with other batches or slots, where those are part of the state
+        if (settings.cannot_take(cur.file_settings)) {
+            ++n_setup;
+            size_setup += file_size;
             continue;
         }
         if (cur.file_settings.n_ctx != 0 && cur.file_settings.n_ctx != n_ctx) {
@@ -1319,9 +1332,15 @@ bool server_prompt_cache::open_store(const std::string & dir, const std::string 
         LLAMA_LOG_INFO("prompt cache: %zu of them were written with another context size than the %u tokens of this server: they fit, and are taken back like the others\n",
             n_other_ctx, n_ctx);
     }
+    // What is left there is not counted in the size of the cache and is never removed by this server: it takes
+    // room in the directory until a server that can read it is started, or somebody removes it.
     if (n_long > 0) {
-        LLAMA_LOG_WARN("prompt cache: %zu prompt(s) of this model are longer than the %u tokens of a slot and are left in %s for a server with a larger context: remove them if they are not wanted\n",
-            n_long, n_ctx_slot, store->dir.c_str());
+        LLAMA_LOG_WARN("prompt cache: %zu prompt(s) of this model (%.3f MiB) are longer than the %u tokens of a slot and are left in %s for a server with a larger context: remove them if they are not wanted\n",
+            n_long, size_long / (1024.0 * 1024.0), n_ctx_slot, store->dir.c_str());
+    }
+    if (n_setup > 0) {
+        LLAMA_LOG_WARN("prompt cache: %zu prompt(s) of this model (%.3f MiB) were written with other batches (-ub, here %u) or slots (-np, here %u), which this server cannot read, and are left in %s: remove them if they are not wanted\n",
+            n_setup, size_setup / (1024.0 * 1024.0), settings.n_ubatch, settings.n_parallel, store->dir.c_str());
     }
     if (n_other + n_bad + n_unread > 0) {
         LLAMA_LOG_WARN("prompt cache: %zu file(s) of another model and %zu that cannot be read are left in %s: remove them if they are not wanted\n",
@@ -1353,7 +1372,8 @@ bool server_prompt_cache::save_to_store(const server_prompt & prompt, size_t sta
         tokens_ctx_shift.discard_n_tokens(prompt.n_kept_prompt, prompt.n_discarded_prompt);
         for (auto it = states.begin(); it != states.end(); ++it) {
             const auto prefix = it->tokens.get_common_prefix(ctx, tokens_ctx_shift);
-            if (prefix.second == tokens_ctx_shift.size()) {
+            // (a file that did not come back in this server does not stand for the prompt)
+            if (prefix.second == tokens_ctx_shift.size() && !it->not_here) {
                 LLAMA_LOG_INFO("%s", " - prompt is already in the cache, skipping\n");
                 return false;
             }
@@ -1419,6 +1439,7 @@ bool server_prompt_cache::save_to_store(const server_prompt & prompt, size_t sta
     cur.think_tokens       = prompt.think_tokens;
     cur.file               = std::move(e);
     cur.file_pos_max       = pos_max;
+    cur.file_settings      = store_settings;
     LLAMA_LOG_INFO(" - written to %s with %zu checkpoints, %.3f MiB in %.2f ms\n", cur.file.path.c_str(), ckpts.size(),
         cur.size() / (1024.0 * 1024.0), (ggml_time_us() - t_start) / 1000.0);
     return true;

@@ -11920,6 +11920,18 @@ bool llama_kv_cache_is_compacted(const struct llama_context * ctx) {
     return ctx && ctx->kv_self.any_compacted();
 }
 
+bool llama_state_seq_any_n_ctx(const struct llama_context * ctx) {
+    // DeepSeek-V4.1, separate builder, every layer in the compacted window: the raw rows are size_swa per
+    // layer, which n_ubatch sets and n_ctx does not; the compressed rows are written as the count in use and
+    // indexed by position; the pooling rings are sized by their ratio. The original V4.1 builder gives its
+    // index keys a capacity per layer and one count for all, and was not read through.
+    if (!ctx || !ctx->kv_self.any_compacted()) {
+        return false;
+    }
+    const auto & hparams = ctx->model.hparams;
+    return llama_model_is_deepseek4(&ctx->model) && hparams.dsv4_shared_streams && llama_hparams::is_v41_separate();
+}
+
 llama_pos llama_kv_cache_swa_rewind_floor(const struct llama_context * ctx) {
     if (!ctx || !ctx->kv_self.any_compacted() || ctx->kv_self.pos_base_swa == 0) {
         return 0;

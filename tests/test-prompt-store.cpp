@@ -206,7 +206,6 @@ int main() {
             ok = ok && found.size() == all.size() + 1 && n_other == 0 && n_bad == 0 &&
                  found.back().fingerprint == renamed && same(store, found.back(), c);
             check(ok, "at the next start it finds both kinds, the newest last");
-            // the old ones are removed like its own
             store.remove(found.back());
             check(count_files(dir) == all.size(), "and removes the one it wrote");
         }
@@ -219,6 +218,86 @@ int main() {
             check(ok && found.empty() && n_other == all.size() && count_files(dir) == all.size(),
                   "a store that is not told the earlier fingerprint takes none of them");
         }
+    }
+
+    // Two earlier fingerprints in one directory, each numbered from 1 (what an earlier server left after a change
+    // of its context size): the files are listed by age, the files of one fingerprint in the order of their numbers.
+    {
+        const std::string ages = base + "/ages";
+        const uint64_t fa = server_prompt_store::hash("model A|4096|5120");
+        const uint64_t fb = server_prompt_store::hash("model A|8192|5120");
+        const uint64_t fn = server_prompt_store::hash("model A|any context|5120");
+        std::vector<conversation> a, b;
+        for (int i = 0; i < 4; ++i) a.push_back(make(200 + 10*i, i%2));
+        for (int i = 0; i < 2; ++i) b.push_back(make(300 + 10*i, 1));
+        ok = true;
+        {
+            server_prompt_store store;
+            ok = ok && store.open(ages, fa);
+            for (int i = 0; i < 3; ++i) ok = ok && write(store, a[i]);
+        }
+        {
+            server_prompt_store store;
+            ok = ok && store.open(ages, fb);
+            for (int i = 0; i < 2; ++i) ok = ok && write(store, b[i]);
+        }
+        {
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = ok && store.open(ages, fa);
+            store.scan(n_other, n_bad);
+            ok = ok && write(store, a[3]) && a[3].entry.seq == 4 && b[1].entry.seq == 2;
+        }
+        // the dates of the files, in the order they were written
+        const auto dated = [] (const conversation & c, long sec) {
+            const struct timespec t[2] = { { sec, 0 }, { sec, 0 } };
+            return utimensat(AT_FDCWD, c.entry.path.c_str(), t, 0) == 0;
+        };
+        ok = ok && dated(a[0], 1000) && dated(a[1], 2000) && dated(a[2], 3000) && dated(b[0], 4000) && dated(b[1], 5000) && dated(a[3], 6000);
+        check(ok, "two earlier fingerprints wrote in one directory, the second between the files of the first");
+        const std::vector<const conversation *> written = { &a[0], &a[1], &a[2], &b[0], &b[1], &a[3] };
+        conversation c = make(700, 1);
+        {
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = store.open(ages, fn, { fb, fa });
+            auto found = store.scan(n_other, n_bad);
+            ok = ok && found.size() == written.size() && n_other == 0 && n_bad == 0;
+            for (size_t i = 0; ok && i < found.size(); ++i) ok = found[i].path == written[i]->entry.path && same(store, found[i], *written[i]);
+            check(ok, "a store that is told both lists their files by age, the oldest first, and not by their numbers");
+            ok = ok && write(store, c) && c.entry.seq == 5;
+            check(ok, "what it writes has a number above all of them");
+            // a file of an earlier fingerprint is removed like its own
+            store.remove(found[1]);
+            found = store.scan(n_other, n_bad);
+            ok = found.size() == written.size() && found[0].path == a[0].entry.path && found[1].path == a[2].entry.path &&
+                 found.back().path == c.entry.path && access(a[1].entry.path.c_str(), F_OK) != 0;
+            check(ok, "a file of an earlier fingerprint is removed like its own");
+        }
+        // a date that does not agree with the numbers of its fingerprint does not change the order under it
+        ok = dated(a[0], 9000);
+        {
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = ok && store.open(ages, fa);
+            auto found = store.scan(n_other, n_bad);
+            ok = ok && found.size() == 3 && found[0].path == a[0].entry.path && found[1].path == a[2].entry.path && found[2].path == a[3].entry.path;
+            check(ok, "under one fingerprint the numbers alone say the order, whatever the dates");
+        }
+        {
+            server_prompt_store store;
+            size_t n_other = 0, n_bad = 0;
+            ok = store.open(ages, fn, { fa, fb });
+            auto found = store.scan(n_other, n_bad);
+            const std::vector<const conversation *> want = { &b[0], &b[1], &a[0], &a[2], &a[3], &c };
+            ok = ok && found.size() == want.size();
+            for (size_t i = 0; ok && i < found.size(); ++i) ok = found[i].path == want[i]->entry.path;
+            check(ok, "among several, each fingerprint keeps the order of its numbers");
+            for (const auto & e : found) store.remove(e);
+            check(count_files(ages) == 0, "all of them removed");
+        }
+        unlink((ages + "/.lock").c_str());
+        rmdir(ages.c_str());
     }
 
     // files that are not conversations, or not whole
