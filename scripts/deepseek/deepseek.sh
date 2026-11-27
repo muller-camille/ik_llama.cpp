@@ -32,6 +32,16 @@
 #            produit ne change pas. UBATCH=512 revient au réglage du serveur.
 #   WEBUI    page web du serveur : llamacpp (celle de llama.cpp, par défaut), auto (celle d'ik_llama.cpp)
 #            ou none (aucune)
+#   CACHE_DIR  dossier où le serveur garde les conversations qu'il met de côté (son cache de prompts, limité
+#            à 100000 Mio). Vide par défaut : elles restent dans la mémoire du serveur et se perdent quand
+#            il s'arrête. Avec CACHE_DIR=/mnt/dscache/cache elles vont dans des fichiers sur un RAM disk,
+#            /mnt/dscache, que ce script monte pour votre compte seul : le serveur les retrouve à son
+#            redémarrage. À son arrêt (un seul Ctrl+C : il finit d'abord la réponse en cours, un deuxième
+#            l'arrête sans rien écrire) il y ajoute la conversation en cours. S'il est tué ou plante, une
+#            conversation revient dans l'état où elle a été écrite la dernière fois, et la suite se relit.
+#            Rien ne survit à un redémarrage de la machine.
+#   CACHE_DISK taille du RAM disk /mnt/dscache, 120G par défaut (il n'occupe que ce qu'on y écrit). Quand
+#            il est plein, le serveur retire les conversations les plus anciennes.
 #
 # Le serveur lancé est celui de la version dans laquelle se trouve ce script ; un dossier ik_llama en
 # premier argument en choisit une autre.
@@ -83,6 +93,8 @@ TB=${TB:-}
 CTX=${CTX:-131072}
 UBATCH=${UBATCH:-2048}
 WEBUI=${WEBUI:-llamacpp}
+CACHE_DIR=${CACHE_DIR:-}
+CACHE_DISK=${CACHE_DISK:-120G}
 
 # --- vérifications ---------------------------------------------------------
 [ "$(id -u)" -ne 0 ] || { echo "Lancez ce script avec votre compte habituel, pas en root."; exit 1; }
@@ -110,6 +122,10 @@ monter /mnt/ramdisk size=200G,huge=always,mpol=interleave
 monter /mnt/ds0     size=300G,huge=always,mpol=bind:0
 monter /mnt/ds1     size=300G,huge=always,mpol=bind:1
 mkdir -p /mnt/ramdisk/model
+# le cache de prompts du serveur, s'il est demandé sur son RAM disk (le serveur crée le dossier lui-même)
+case $CACHE_DIR in
+    /mnt/dscache|/mnt/dscache/*) monter /mnt/dscache "size=$CACHE_DISK,mpol=interleave,mode=0700,uid=$(id -u),gid=$(id -g)" ;;
+esac
 
 # --- chargement (ne recopie que ce qui manque) -----------------------------
 echo "== Poids et drafter vers le socket 0"
@@ -137,6 +153,7 @@ ARGS=(-m "/mnt/ds0/$M-00001-of-00009.gguf" --numa-mirror /mnt/ds1
 [ -z "$TB" ]      || ARGS+=(-tb "$TB")
 [ -z "$API_KEY" ] || ARGS+=(--api-key "$API_KEY")
 [ -z "$DRAFT" ]   || ARGS+=(-md "/mnt/ds0/$DRAFT" --spec-type "$SPEC")
+[ -z "$CACHE_DIR" ] || ARGS+=(-cram-dir "$CACHE_DIR")
 ARGS+=(-b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH")
 echo "== Démarrage du serveur sur $HOST:$PORT, $T threads${TB:+ ($TB pour les lots de tokens)}, modèle $M (Ctrl+C pour l'arrêter)"
 cd "$IK_DIR"

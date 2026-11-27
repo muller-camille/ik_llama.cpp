@@ -2510,6 +2510,8 @@ self.addEventListener('activate', (e) => e.waitUntil((async () => {
     sigint_action.sa_flags = 0;
     sigaction(SIGINT, &sigint_action, NULL);
     sigaction(SIGTERM, &sigint_action, NULL);
+    // a terminal that closes stops the server the same way: what it then saves is saved (--cache-ram-dir)
+    sigaction(SIGHUP, &sigint_action, NULL);
 #elif defined (_WIN32)
     auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {
         return (ctrl_type == CTRL_C_EVENT) ? (signal_handler(SIGINT), true) : false;
@@ -2518,6 +2520,9 @@ self.addEventListener('activate', (e) => e.waitUntil((async () => {
 #endif
 
     ctx_server.queue_tasks.start_loop();
+
+    // nothing computes any more: what the slots hold can be put with the cache that is kept in a directory
+    ctx_server.save_slots_at_exit();
 
     svr->stop();
     t.join();

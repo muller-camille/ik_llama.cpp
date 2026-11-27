@@ -303,6 +303,9 @@ struct server_context {
 
     void copy_data_to_cached_prompt(const server_tokens& tokens, server_slot& slot);
 
+    // the prompts of the slots go to the directory of the cache, if it has one (--cache-ram-dir)
+    void save_slots_at_exit();
+
     server_slot* get_available_slot(const server_task& task);
 
     int32_t populate_vocab_pieces();

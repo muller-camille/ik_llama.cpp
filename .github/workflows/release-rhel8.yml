@@ -288,14 +288,16 @@ jobs:
 
           On a Xeon with AMX (Sapphire Rapids and later), a batch of 48 tokens or more is multiplied with the \`Q8_0_R8\` matrices through the AMX tiles, as bf16: about twice as fast for those products, which are a fifth of the reading of a prompt with DeepSeek-V4.1. \`grep amx /proc/cpuinfo\` tells whether the system gives AMX to programs; \`GGML_AMX=0\` in the environment turns it off. \`GGML_AMX_ATTN=1\` sends the attention of a prompt batch through the tiles too (DeepSeek-V4: a third of the reading of a prompt). It is not the default: queries, cache rows and attention weights are rounded to bf16 there, and its speed is not measured yet.
 
+          \`llama-server --cache-ram-dir DIR\` keeps the prompt cache (the conversations the server sets aside when another one comes) as files in DIR instead of in its own memory. With DIR on a RAM disk they are still there after the server is restarted, and the conversation in each slot is added when the server stops. Off unless asked for.
+
           \`llama-server --webui llamacpp\` serves the current web UI of llama.cpp ("Llama Chat"); without the option it serves the one of ik_llama.cpp.
 
           The package also holds the shell scripts used for DeepSeek-V4.1 on a 2-socket machine; their messages are in French. They use the tools next to them, and read what is specific to the machine (\`NFS\`, \`API_KEY\`, \`HOST\`, ...) from \`~/.deepseek.conf\`, one \`NAME=value\` per line:
 
-          - \`deepseek.sh\`: loads the model into RAM, one copy of the weights per socket, and starts the server, with one thread per physical core, with or without a draft model (\`T\` sets another count)
+          - \`deepseek.sh\`: loads the model into RAM, one copy of the weights per socket, and starts the server, with one thread per physical core, with or without a draft model (\`T\` sets another count). \`CACHE_DIR=/mnt/dscache/cache\` keeps the conversations the server set aside on a RAM disk, where it finds them again after a restart
           - \`charger-deepseek.sh\`: the loading alone, as root
           - \`mesure.sh\`: starts a server of its own and measures the speed, with or without a draft
-          - \`profil.sh\`: the same with \`GGML_PROFILE=1\`, in one run without and with the drafter, with one thread per core, then one per logical CPU, after a short and after a long prompt, then with one setting changed at a time, several tries per pass on several subjects; it ends with a table of the passes, the fastest thread count column by column and what each setting changes. About 2 hours on 2 x 16 cores, 20 minutes with \`RAPIDE=1\`
+          - \`profil.sh\`: the same with \`GGML_PROFILE=1\`, in one run without and with the drafter, with one thread per core, then one per logical CPU, after a short and after a long prompt, then with one setting changed at a time, several tries per pass on several subjects; it ends with a table of the passes, the fastest thread count column by column and what each setting changes. About 2 hours on 2 x 16 cores, 25 minutes with \`RAPIDE=1\`
           - \`drafter.sh\`: tries several settings of the DSpark draft
           - \`recompresser.sh\`: requantizes the non-expert \`Q8_0\` tensors and installs the result next to the model
           - \`harness.sh\`: starts [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (\`dsh\`, to be installed apart: Node.js 24.9 or newer, \`npm install -g @deepseek-ai/dsh\`) with the server in the place of DeepSeek's API

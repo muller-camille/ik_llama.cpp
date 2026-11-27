@@ -31382,6 +31382,27 @@ static const struct ggml_tensor * ggml_prof_weights(const struct ggml_tensor * n
     return w && w->op == GGML_OP_NONE && w->name[0] ? w : NULL;
 }
 
+// How many of the n_expert experts the ids name, each one counted once. ids: [experts per token, tokens], i32.
+static int64_t ggml_prof_distinct_ids(const struct ggml_tensor * ids, int64_t n_expert) {
+    uint64_t seen[64]; // one bit per expert
+    if (ids->type != GGML_TYPE_I32 || !ids->data || n_expert <= 0 || n_expert > (int64_t)(64*sizeof(seen)/sizeof(seen[0]))) {
+        // not ids as the expert nodes read them: as many experts as there are ids
+        return MIN(n_expert, ids->ne[0]*ids->ne[1]);
+    }
+    memset(seen, 0, sizeof(seen));
+    int64_t n_used = 0;
+    for (int64_t i1 = 0; i1 < ids->ne[1]; ++i1) {
+        for (int64_t i0 = 0; i0 < ids->ne[0]; ++i0) {
+            const int32_t id = *(const int32_t *)((const char *)ids->data + i1*ids->nb[1] + i0*ids->nb[0]);
+            if (id >= 0 && id < n_expert && !(seen[id >> 6] >> (id & 63) & 1)) {
+                seen[id >> 6] |= (uint64_t)1 << (id & 63);
+                ++n_used;
+            }
+        }
+    }
+    return n_used;
+}
+
 static int64_t ggml_prof_weight_bytes(const struct ggml_tensor * node) {
     const struct ggml_tensor * w = ggml_prof_weights(node);
     if (!w) {
@@ -31395,13 +31416,15 @@ static int64_t ggml_prof_weight_bytes(const struct ggml_tensor * node) {
             return ggml_nbytes(w) + (node->src[1] ? ggml_nbytes(node->src[1]) : 0);
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_MOE_FUSED_UP_GATE: {
-            // the experts that the tokens selected, counted as if no two tokens shared one
+            // The experts that the tokens of the graph selected, each one once: the tokens that picked an expert
+            // are computed together on its weights, which are read once. (Counted as if no two tokens shared an
+            // expert, the read rate of a graph of several tokens came out too high.) Called when the node has just
+            // been computed: its ids are still where it read them.
             const bool up_gate = node->op == GGML_OP_MOE_FUSED_UP_GATE;
             const struct ggml_tensor * ids = node->src[up_gate ? 3 : 2];
             const int64_t n_expert = w->ne[2];
-            const int64_t n_used   = MIN(n_expert, ids->ne[0]*ids->ne[1]);
             const int64_t bytes    = ggml_nbytes(w) + (up_gate && node->src[1] ? ggml_nbytes(node->src[1]) : 0);
-            return bytes/n_expert*n_used;
+            return bytes/n_expert*ggml_prof_distinct_ids(ids, n_expert);
         }
         default:
             return 0;
@@ -31598,7 +31621,8 @@ static void ggml_prof_report(void) {
         if (!legend) {
             legend = true;
             fprintf(stderr, "\nggml_profile: ms = elapsed time per graph. busy = work time of a thread / elapsed time: all the threads,\n");
-            fprintf(stderr, "ggml_profile: the even ones, the odd ones, the least and the most busy one. GB/s = weight bytes read / elapsed time.\n");
+            fprintf(stderr, "ggml_profile: the even ones, the odd ones, the least and the most busy one. GB/s = weight bytes read / elapsed time;\n");
+            fprintf(stderr, "ggml_profile: an expert that several tokens of a graph picked is read once, and counted once.\n");
         }
         const double n_graphs = (double)g->n_graphs;
         const double ms       = 1e-6/n_graphs; // ns in total -> ms per graph
