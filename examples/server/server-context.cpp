@@ -467,6 +467,19 @@ void server_context::init() {
         LLAMA_LOG_INFO("%s", "use `--cache-ram 0` to disable the prompt cache\n");
         // only apply ram size limit. No token limit for now.
         prompt_cache = std::make_unique<server_prompt_cache>(ctx, params_base.cache_ram_mib, 0);
+        if (!params_base.cache_ram_dir.empty()) {
+            // The cache as files in a directory, for one on a RAM disk: the prompts that were set aside are
+            // still there after the server was stopped. A file is taken back only by the model and the
+            // context size that wrote it.
+            char desc[256];
+            llama_model_desc(model, desc, sizeof(desc));
+            const std::string fingerprint = std::string(desc) + "|" + std::to_string(llama_model_size(model)) + "|" +
+                std::to_string(llama_model_n_params(model)) + "|" + std::to_string(llama_n_vocab(model)) + "|" +
+                std::to_string(llama_n_ctx(ctx)) + "|" + std::to_string(LLAMA_STATE_SEQ_VERSION);
+            if (prompt_cache->open_store(params_base.cache_ram_dir, fingerprint)) {
+                prompt_cache->update();
+            }
+        }
     }
     else {
         if (params_base.cache_ram_mib != 0) {
@@ -540,6 +553,14 @@ void server_slot::prompt_save(server_prompt_cache& prompt_cache) const {
 
     LLAMA_LOG_INFO(" - saving prompt with length %d, total state size = %.3f MiB\n",
         (int)server_cached_prompt.tokens.size(), cur_size / (1024.0 * 1024.0));
+
+    if (prompt_cache.store) {
+        // the cache is kept in a directory: the state goes from the context to the file
+        prompt_cache.save_to_store(server_cached_prompt, cur_size, [&] (uint8_t * dst) {
+            return llama_state_seq_get_data(ctx, dst, cur_size, id, 0) == cur_size;
+        });
+        return;
+    }
 
     auto* cur = prompt_cache.alloc(server_cached_prompt, cur_size);
     if (cur == nullptr) {
@@ -1040,6 +1061,27 @@ std::pair<common_prefix, float> server_context::calculate_slot_similarity(const 
     sim.first = lcp_len;
     sim.second = sim_cur;
     return sim;
+}
+
+// When the server stops and its cache is kept in a directory: the prompt each slot holds goes there too, as when
+// it is set aside for another one. The prompts that were set aside before are there already.
+void server_context::save_slots_at_exit() {
+    if (!prompt_cache || !prompt_cache->store) {
+        return;
+    }
+    bool saved = false;
+    for (server_slot & slot : slots) {
+        if (!slot.available() || slot.cache_tokens.size() == 0 || (int)slot.cache_tokens.size() < cache_ram_n_min) {
+            continue;
+        }
+        LLAMA_LOG_INFO("prompt cache: the prompt of slot %d goes to %s (a second Ctrl+C gives it up)\n", slot.id, prompt_cache->store->dir.c_str());
+        copy_data_to_cached_prompt(slot.cache_tokens, slot);
+        slot.prompt_save(*prompt_cache);
+        saved = true;
+    }
+    if (saved) {
+        prompt_cache->update();
+    }
 }
 
 void server_context::copy_data_to_cached_prompt(const server_tokens & tokens, server_slot & slot) {
@@ -2224,7 +2266,7 @@ bool server_context::system_prompt_set(const std::string& sys_prompt) {
         }
     }
     if (prompt_cache) {
-        prompt_cache->states.clear();
+        prompt_cache->clear();
     }
 
     system_need_update = true;

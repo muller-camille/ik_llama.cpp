@@ -3223,6 +3223,11 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.cache_ram_similarity = std::stof(argv[i]);
         return true;
     }
+    if (arg == "-cram-dir" || arg == "--cache-ram-dir") {
+        CHECK_ARG
+        params.cache_ram_dir = argv[i];
+        return true;
+    }
     if (arg == "-cram-n-min" || arg == "--cache-ram-n-min") {
         CHECK_ARG
         params.cache_ram_n_min = std::stoi(argv[i]);
@@ -3429,6 +3434,7 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-ctx-ckpt-e NAME, --ctx-checkpoints-eviction NAME", "Eviction strategy for checkpoint. Accepts fifo, variance and auto. Auto defaults to variance. Variance preserves coverage and maintains uniform interval.  (default: variance)" });
     options.push_back({ "*",           "-cram, --cache-ram N",          "set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)",params.cache_ram_mib });
     options.push_back({ "*",           "-crs,  --cache-ram-similarity N",           "minimum fraction of a cached entry that must match the new prompt for that entry to be reusable (default: %.2f).",params.cache_ram_similarity });
+    options.push_back({ "*",           "-cram-dir DIR, --cache-ram-dir DIR",           "keep the prompt cache as files in DIR, not in the memory of the server: for a directory on a RAM disk. The prompts are still there when the server starts again, and the prompt of each slot is added when it stops. The size limit is that of --cache-ram." });
     options.push_back({ "*",           "-cram-n-min N, --cache-ram-n-min N",           "minimum number of the cached tokens that triggers prompt cache (default: %d).", params.cache_ram_n_min });
     options.push_back({ "*",           "-n,    --predict N",            "number of tokens to predict (default: %d, -1 = infinity, -2 = until context filled)", params.n_predict });
     options.push_back({ "*",           "-b,    --batch-size N",         "logical maximum batch size (default: %d)", params.n_batch });

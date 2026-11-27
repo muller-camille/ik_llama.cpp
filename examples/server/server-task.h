@@ -7,7 +7,10 @@
 #include <list>
 // TODO: prevent including the whole server-common.h as we only use server_tokens
 #include "server-common.h"
+#include "server-prompt-store.h"
 
+#include <functional>
+#include <memory>
 #include <vector>
 
 using json = nlohmann::ordered_json;
@@ -421,6 +424,14 @@ struct server_prompt {
 
     std::list<server_prompt_checkpoint> checkpoints;
 
+    // A prompt of a cache that is kept in a directory (--cache-ram-dir): its state and its checkpoints are in
+    // this file, data and checkpoints are empty.
+    server_prompt_store::entry file;
+
+    bool in_file() const {
+        return !file.path.empty();
+    }
+
     size_t size() const;
 
     int n_tokens() const {
@@ -478,4 +489,24 @@ struct server_prompt_cache {
     bool load(server_prompt& prompt, const server_tokens& tokens_new, llama_context* ctx, int32_t id_slot, float min_reusable_fraction);
 
     void update();
+
+    // The cache kept in a directory (--cache-ram-dir), null if it is in the memory of the server.
+    // With it, a prompt goes to a file when it is saved (save_to_store, in the place of alloc), is read from the
+    // file when it is loaded, and the file goes when the prompt leaves the cache.
+    std::unique_ptr<server_prompt_store> store;
+
+    // Opens the directory and takes the prompts that are there for this model. False: the cache stays in memory.
+    bool open_store(const std::string & dir, const std::string & model_fingerprint);
+
+    // fill gets the place of the state_size bytes of the state and says whether it put them there
+    bool save_to_store(const server_prompt & prompt, size_t state_size, const std::function<bool(uint8_t *)> & fill);
+
+    // removes a prompt, with its file
+    std::list<server_prompt>::iterator erase(std::list<server_prompt>::iterator it);
+
+    void clear();
+
+private:
+    // False if the prompt is in the cache already. The cached prompts that it contains are removed.
+    bool forget_contained(const server_prompt & prompt);
 };

@@ -2519,6 +2519,9 @@ self.addEventListener('activate', (e) => e.waitUntil((async () => {
 
     ctx_server.queue_tasks.start_loop();
 
+    // nothing computes any more: what the slots hold can be put with the cache that is kept in a directory
+    ctx_server.save_slots_at_exit();
+
     svr->stop();
     t.join();
 

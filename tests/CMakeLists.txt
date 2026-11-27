@@ -163,6 +163,10 @@ llama_test(test-amx-gemm)
 llama_build(test-amx-attn.cpp)
 llama_test(test-amx-attn)
 
+# the files of the prompt cache that the server keeps in a directory (--cache-ram-dir): no model needed
+llama_build(test-prompt-store.cpp)
+llama_test(test-prompt-store)
+
 llama_build(test-serial-nodes.cpp)
 llama_test(test-serial-nodes)
 
