@@ -290,7 +290,7 @@ jobs:
 
           \`llama-server --cache-ram-dir DIR\` keeps the prompt cache (the conversations the server sets aside when another one comes) as files in DIR instead of in its own memory. With DIR on a RAM disk they are still there after the server is restarted, and the conversation in each slot is added when the server stops. Off unless asked for.
 
-\`llama-server --webui llamacpp\` serves the current web UI of llama.cpp ("Llama Chat"); without the option it serves the one of ik_llama.cpp.
+          \`llama-server --webui llamacpp\` serves the current web UI of llama.cpp ("Llama Chat"); without the option it serves the one of ik_llama.cpp.
 
           The package also holds the shell scripts used for DeepSeek-V4.1 on a 2-socket machine; their messages are in French. They use the tools next to them, and read what is specific to the machine (\`NFS\`, \`API_KEY\`, \`HOST\`, ...) from \`~/.deepseek.conf\`, one \`NAME=value\` per line:
 
