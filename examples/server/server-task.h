@@ -414,6 +414,34 @@ struct server_prompt_checkpoint {
 };
 
 
+// What a server was started with, written with every file of the prompt cache. 0: the file does not say (those
+// of the versions up to rhel8-b5399 say the context size by their fingerprint, and nothing else).
+struct server_prompt_settings {
+    uint32_t n_ctx      = 0;
+    uint32_t n_ubatch   = 0;
+    uint32_t n_parallel = 0;
+    // Of this server only, not written: whether the size of the batches and the number of slots are part of how
+    // the state of a prompt is laid out (the compacted sliding window; the streams of DeepSeek-V4). A file
+    // written with another one is then known not to come back here.
+    bool batch_in_state = false;
+    bool slots_in_state = false;
+
+    uint32_t n_ctx_slot() const {
+        return n_ctx / (n_parallel > 0 ? n_parallel : 1);
+    }
+    // whether a file written with `other` comes from a server set up in another way, as far as it says
+    bool differs(const server_prompt_settings & other) const {
+        return (other.n_ctx      != 0 && other.n_ctx      != n_ctx) ||
+               (other.n_ubatch   != 0 && other.n_ubatch   != n_ubatch) ||
+               (other.n_parallel != 0 && other.n_parallel != n_parallel);
+    }
+    // whether a file written with `other` is known not to come back in this server
+    bool cannot_take(const server_prompt_settings & other) const {
+        return (batch_in_state && other.n_ubatch   != 0 && other.n_ubatch   != n_ubatch) ||
+               (slots_in_state && other.n_parallel != 0 && other.n_parallel != n_parallel);
+    }
+};
+
 struct server_prompt {
     server_tokens tokens;
     int n_kept_prompt;
@@ -429,6 +457,11 @@ struct server_prompt {
     server_prompt_store::entry file;
     // the last position of the state in the file, to check what comes back from it (-1: not known)
     llama_pos file_pos_max = -1;
+    // the settings of the server that wrote the file
+    server_prompt_settings file_settings;
+    // The file did not come back in this server, which is not set up as the one that wrote it: it stays in the
+    // directory, where it counts and goes like the others, and is not tried again by this server.
+    bool not_here = false;
     // The slot that took this prompt back from its file. The file stays, so that the prompt is not lost if the
     // server dies, until that slot writes a newer state of the same conversation. -1: no slot has it.
     int held_by = -1;
@@ -503,7 +536,14 @@ struct server_prompt_cache {
     std::unique_ptr<server_prompt_store> store;
 
     // Opens the directory and takes the prompts that are there for this model. False: the cache stays in memory.
-    bool open_store(const std::string & dir, const std::string & model_fingerprint);
+    // A prompt is listed when it can come back here: it fits in the context of a slot, and it was not written
+    // with other batches or slots where those are part of the state. The others are left in the directory.
+    // `earlier` are fingerprints (server_prompt_store::hash) that an earlier version of the server gave the
+    // files of this model, each with the context size it stood for: read and removed like the others.
+    bool open_store(const std::string & dir, const std::string & model_fingerprint,
+                    const std::vector<std::pair<uint64_t, uint32_t>> & earlier, const server_prompt_settings & settings);
+    // the settings of this server, written with every file
+    server_prompt_settings store_settings;
 
     // The prompt of slot id_slot goes to a file. fill gets the place of the state_size bytes of the state and says
     // whether it put them there; pos_max is the last position of that state. When the directory has no room, the

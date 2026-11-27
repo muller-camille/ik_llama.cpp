@@ -27,7 +27,11 @@
 #   TB       threads quand le modèle calcule plusieurs tokens ensemble (lecture d'un prompt, vérification
 #            des tokens du drafter), option -tb du serveur ; T par défaut. À laisser égal à T avec un
 #            drafter : mesuré à 32/64, un pas dure 94 ms au lieu de 83, le temps de réveiller les threads.
-#   CTX      contexte, 131072 par défaut
+#   CTX      contexte, 131072 par défaut. Les conversations gardées dans CACHE_DIR ne tiennent pas à cette
+#            taille : après un changement de CTX, le serveur reprend celles qui tiennent dans le nouveau
+#            contexte et laisse les autres dans le dossier, pour un serveur au contexte plus grand.
+#            Elles tiennent en revanche à UBATCH : écrites avec une autre taille de lot, elles restent
+#            dans le dossier sans être reprises. Le serveur dit à son démarrage combien il en laisse.
 #   UBATCH   tokens du prompt lus ensemble (option -ub du serveur), 2048 par défaut. Avec --swa-compress, les
 #            19 dernières couches de DeepSeek-V4.1 ne sont calculées que sur les 256 derniers tokens de chaque
 #            lot : plus le lot est grand, moins de tokens du prompt y passent. Mesuré sur 2 x 16 cœurs avec un

@@ -814,6 +814,14 @@ extern "C" {
 
     LLAMA_API bool llama_kv_cache_is_compacted(const struct llama_context * ctx);
 
+    // Returns whether the state of one sequence, as llama_state_seq_get_data() writes it, is the same whatever
+    // the size of the context: a context of the same model with another n_ctx then reads it, if it has room for
+    // it and the same n_ubatch and n_seq_max. True only where the state was read through for it: DeepSeek-V4.1
+    // with its separate graph builder and the compacted sliding window (--swa-compress). Elsewhere a context
+    // of another size may refuse the state, or, where the rotation of the positions is chosen by the context
+    // size, read one that does not match what it computes.
+    LLAMA_API bool llama_state_seq_any_n_ctx(const struct llama_context * ctx);
+
     LLAMA_API llama_pos llama_kv_cache_swa_rewind_floor(const struct llama_context * ctx);
 
     LLAMA_API llama_pos llama_kv_cache_n_swa(const struct llama_context * ctx);

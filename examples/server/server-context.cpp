@@ -469,27 +469,57 @@ void server_context::init() {
         prompt_cache = std::make_unique<server_prompt_cache>(ctx, params_base.cache_ram_mib, 0);
         if (!params_base.cache_ram_dir.empty()) {
             // The cache as files in a directory, for one on a RAM disk: the prompts that were set aside are
-            // still there after the server was stopped. A file is taken back only by the model and the
-            // context size that wrote it.
+            // still there after the server was stopped. A file is taken back only by the model that wrote it.
             char desc[256];
             llama_model_desc(model, desc, sizeof(desc));
-            std::string fingerprint = std::string(desc) + "|" + std::to_string(llama_model_size(model)) + "|" +
-                std::to_string(llama_model_n_params(model)) + "|" + std::to_string(llama_n_vocab(model)) + "|" +
-                std::to_string(llama_n_ctx(ctx)) + "|" + std::to_string(LLAMA_STATE_SEQ_VERSION);
+            const std::string model_part = std::string(desc) + "|" + std::to_string(llama_model_size(model)) + "|" +
+                std::to_string(llama_model_n_params(model)) + "|" + std::to_string(llama_n_vocab(model)) + "|";
             // the file of the model, as it is now, and what is loaded with it: another file under the same
             // name, a projector or an adapter make another model
-            fingerprint += "|" + params_base.model;
+            std::string loaded_part = "|" + std::to_string(LLAMA_STATE_SEQ_VERSION) + "|" + params_base.model;
             std::error_code ec;
             const auto model_size = std::filesystem::file_size(params_base.model, ec);
-            fingerprint += "|" + std::to_string(ec ? 0 : (uint64_t)model_size);
+            loaded_part += "|" + std::to_string(ec ? 0 : (uint64_t)model_size);
             const auto model_time = std::filesystem::last_write_time(params_base.model, ec);
-            fingerprint += "|" + std::to_string(ec ? 0 : (long long)model_time.time_since_epoch().count());
-            fingerprint += "|" + params_base.mmproj.path;
+            loaded_part += "|" + std::to_string(ec ? 0 : (long long)model_time.time_since_epoch().count());
+            loaded_part += "|" + params_base.mmproj.path;
             for (const auto & lora : params_base.lora_adapters) {
-                fingerprint += "|" + lora.path + ":" + std::to_string(lora.scale);
+                loaded_part += "|" + lora.path + ":" + std::to_string(lora.scale);
             }
-            fingerprint += "|" + std::to_string(params_base.control_vectors.size());
-            if (prompt_cache->open_store(params_base.cache_ram_dir, fingerprint)) {
+            loaded_part += "|" + std::to_string(params_base.control_vectors.size());
+            // The context size is part of the fingerprint, as it always was, except where the engine says that
+            // the state of a prompt does not depend on it (DeepSeek-V4.1 as deepseek.sh runs it): there a
+            // prompt comes back in any context it fits in.
+            const uint32_t n_ctx = llama_n_ctx(ctx);
+            const bool any_ctx = llama_state_seq_any_n_ctx(ctx);
+            const std::string fingerprint = model_part + (any_ctx ? std::string("any context") : std::to_string(n_ctx)) + loaded_part;
+            // Up to rhel8-b5399 the context size was in every fingerprint. Where it no longer is, the files of
+            // those versions are found for every size a context could have: the multiples of 256 (what the
+            // engine rounds it up to; of 32 without flash attention) up to 4194304 tokens.
+            std::vector<std::pair<uint64_t, uint32_t>> earlier;
+            if (any_ctx) {
+                const uint32_t step = params_base.flash_attn ? 256 : 32;
+                for (uint32_t n = step; n <= 4194304; n += step) {
+                    earlier.emplace_back(server_prompt_store::hash(model_part + std::to_string(n) + loaded_part), n);
+                }
+                if (n_ctx % step != 0 || n_ctx > 4194304) {
+                    earlier.emplace_back(server_prompt_store::hash(model_part + std::to_string(n_ctx) + loaded_part), n_ctx);
+                }
+            }
+            server_prompt_settings settings;
+            settings.n_ctx      = n_ctx;
+            settings.n_ubatch   = (uint32_t)std::max(0, params_base.n_ubatch);
+            settings.n_parallel = (uint32_t)std::max(1, params_base.n_parallel);
+            // the compacted sliding window has a row count that the batches set; DeepSeek-V4 has one stream
+            // of compressed rows per slot
+            settings.batch_in_state = llama_kv_cache_is_compacted(ctx);
+            settings.slots_in_state = llama_model_is_deepseek4(model);
+            if (prompt_cache->open_store(params_base.cache_ram_dir, fingerprint, earlier, settings)) {
+                if (any_ctx) {
+                    LLAMA_LOG_INFO("%s", "prompt cache: a prompt of this model comes back whatever the context size it was written with, if it fits\n");
+                } else {
+                    LLAMA_LOG_INFO("prompt cache: a prompt of this model comes back only in a context of the size that wrote it (%u tokens here)\n", n_ctx);
+                }
                 prompt_cache->update();
             }
         }
