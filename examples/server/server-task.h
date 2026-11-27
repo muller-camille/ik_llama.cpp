@@ -427,6 +427,13 @@ struct server_prompt {
     // A prompt of a cache that is kept in a directory (--cache-ram-dir): its state and its checkpoints are in
     // this file, data and checkpoints are empty.
     server_prompt_store::entry file;
+    // the last position of the state in the file, to check what comes back from it (-1: not known)
+    llama_pos file_pos_max = -1;
+    // The slot that took this prompt back from its file. The file stays, so that the prompt is not lost if the
+    // server dies, until that slot writes a newer state of the same conversation. -1: no slot has it.
+    int held_by = -1;
+    // times the file could not be read
+    int n_failed = 0;
 
     bool in_file() const {
         return !file.path.empty();
@@ -498,8 +505,11 @@ struct server_prompt_cache {
     // Opens the directory and takes the prompts that are there for this model. False: the cache stays in memory.
     bool open_store(const std::string & dir, const std::string & model_fingerprint);
 
-    // fill gets the place of the state_size bytes of the state and says whether it put them there
-    bool save_to_store(const server_prompt & prompt, size_t state_size, const std::function<bool(uint8_t *)> & fill);
+    // The prompt of slot id_slot goes to a file. fill gets the place of the state_size bytes of the state and says
+    // whether it put them there; pos_max is the last position of that state. When the directory has no room, the
+    // older states of this conversation go first, then the oldest prompts, until the file fits.
+    bool save_to_store(const server_prompt & prompt, size_t state_size, const std::function<bool(uint8_t *)> & fill,
+                       int id_slot, llama_pos pos_max);
 
     // removes a prompt, with its file
     std::list<server_prompt>::iterator erase(std::list<server_prompt>::iterator it);
@@ -509,4 +519,7 @@ struct server_prompt_cache {
 private:
     // False if the prompt is in the cache already. The cached prompts that it contains are removed.
     bool forget_contained(const server_prompt & prompt);
+
+    // whether at least half of the cached prompt is the start of the other one, thinking left out as load() does
+    bool starts_alike(const server_prompt & cached, const server_prompt & prompt) const;
 };

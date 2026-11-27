@@ -2510,6 +2510,8 @@ self.addEventListener('activate', (e) => e.waitUntil((async () => {
     sigint_action.sa_flags = 0;
     sigaction(SIGINT, &sigint_action, NULL);
     sigaction(SIGTERM, &sigint_action, NULL);
+    // a terminal that closes stops the server the same way: what it then saves is saved (--cache-ram-dir)
+    sigaction(SIGHUP, &sigint_action, NULL);
 #elif defined (_WIN32)
     auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {
         return (ctrl_type == CTRL_C_EVENT) ? (signal_handler(SIGINT), true) : false;

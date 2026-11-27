@@ -1133,55 +1133,65 @@ bool server_prompt_cache::load(server_prompt& prompt, const server_tokens& token
         LLAMA_LOG_INFO(" - found better prompt with f_keep = %.3f, sim = %.3f, n_keep = %d, n_discarded_prompt = %d, in %s\n", f_keep_best, sim_best, it_best->n_kept_prompt, it_best->n_discarded_prompt, it_best->file.path.c_str());
         const int64_t t_start = ggml_time_us();
         const size_t size = it_best->file.state_size;
-        // the checkpoints first: once the state is in the context there is no way back
+        // The checkpoints and the mapping first: if the file cannot be read, the context was not touched and the
+        // slot goes on with what it has. The file is given up after three such failures.
         std::vector<server_prompt_store::ckpt_out> ckpts;
-        if (!store->read_checkpoints(it_best->file, ckpts)) {
-            LLAMA_LOG_WARN(" - %s: the prompt is dropped\n", store->error.c_str());
-            erase(it_best);
-            return false;
+        const uint8_t * state = nullptr;
+        if (store->read_checkpoints(it_best->file, ckpts)) {
+            state = store->map_state(it_best->file);
         }
-        const uint8_t * state = store->map_state(it_best->file);
-        const size_t n = state ? llama_state_seq_set_data(ctx, state, size, id_slot, 0) : 0;
-        store->unmap_state(it_best->file, state);
-        if (!state || n != size) {
-            // A file of another build or of other settings can fail here, with the sequence in an unknown
-            // state: the slot starts from nothing, and the file is not tried again.
-            LLAMA_LOG_WARN(" - failed to restore the state of %zu bytes of %s%s%s: the prompt is dropped and the slot is emptied\n",
-                size, it_best->file.path.c_str(), state ? "" : ": ", state ? "" : store->error.c_str());
-            if (state) {
-                llama_kv_cache_seq_rm(ctx, id_slot, -1, -1);
-                prompt.tokens.clear();
-                prompt.n_kept_prompt = 0;
-                prompt.n_discarded_prompt = 0;
-                for (auto & c : prompt.checkpoints) {
-                    if (!c.spill_path.empty()) {
-                        remove(c.spill_path.c_str());
-                    }
-                }
-                prompt.checkpoints.clear();
+        if (!state) {
+            const bool give_up = ++it_best->n_failed >= 3;
+            LLAMA_LOG_WARN(" - %s%s\n", store->error.c_str(), give_up ? ": the prompt is dropped" : "");
+            if (give_up) {
+                erase(it_best);
             }
-            erase(it_best);
             return false;
         }
+        const size_t n = llama_state_seq_set_data(ctx, state, size, id_slot, 0);
+        store->unmap_state(it_best->file, state);
+        const llama_pos pos_max = llama_kv_cache_seq_pos_max(ctx, id_slot);
         // the checkpoints the slot had are those of the prompt it leaves
         for (auto & c : prompt.checkpoints) {
             if (!c.spill_path.empty()) {
                 remove(c.spill_path.c_str());
             }
         }
-        store->remove(it_best->file);
-        it_best->file = server_prompt_store::entry();
-        it_best->checkpoints.clear();
+        prompt.checkpoints.clear();
+        prompt.data.clear();
+        if (n != size || (it_best->file_pos_max >= 0 && pos_max != it_best->file_pos_max)) {
+            // A file of another build or of other settings can fail here, with the sequence in an unknown
+            // state: the slot starts from nothing, and the file is not tried again.
+            LLAMA_LOG_WARN(" - the state of %s was not restored (%zu of %zu bytes, last position %d, expected %d): the prompt is dropped and the slot is emptied\n",
+                it_best->file.path.c_str(), n, size, (int)pos_max, (int)it_best->file_pos_max);
+            llama_kv_cache_seq_rm(ctx, id_slot, -1, -1);
+            prompt.tokens.keep_first(0);
+            prompt.n_kept_prompt = 0;
+            prompt.n_discarded_prompt = 0;
+            erase(it_best);
+            return false;
+        }
+        // The slot gets the prompt and its checkpoints. The file stays in the cache, held by the slot, until the
+        // slot writes a newer state of this conversation: a server that dies meanwhile finds it at its next start.
+        for (auto & other : states) {
+            if (other.held_by == id_slot) {
+                other.held_by = -1;
+            }
+        }
+        it_best->held_by  = id_slot;
+        it_best->n_failed = 0;
+        prompt.tokens             = it_best->tokens.clone();
+        prompt.n_kept_prompt      = it_best->n_kept_prompt;
+        prompt.n_discarded_prompt = it_best->n_discarded_prompt;
+        prompt.think_tokens       = it_best->think_tokens;
         for (auto & c : ckpts) {
-            auto & cur = it_best->checkpoints.emplace_back();
+            auto & cur = prompt.checkpoints.emplace_back();
             cur.pos_min    = c.pos_min;
             cur.pos_max    = c.pos_max;
             cur.n_tokens   = c.n_tokens;
             cur.prompt_end = c.prompt_end;
             cur.data       = std::move(c.data);
         }
-        prompt = std::move(*it_best);
-        states.erase(it_best);
         LLAMA_LOG_INFO(" - read %.3f MiB and %zu checkpoints from the file in %.2f ms\n", size / (1024.0 * 1024.0), prompt.checkpoints.size(), (ggml_time_us() - t_start) / 1000.0);
     }
     else if (it_best != states.end()) {
@@ -1259,6 +1269,7 @@ bool server_prompt_cache::open_store(const std::string & dir, const std::string 
             cur.think_tokens.exclude = think.value("exclude", cur.think_tokens.exclude);
             cur.think_tokens.begin   = think.value("begin",   cur.think_tokens.begin);
             cur.think_tokens.end     = think.value("end",     cur.think_tokens.end);
+            cur.file_pos_max         = meta.value<llama_pos>("pos_max", -1);
         }
         catch (const std::exception &) {
             ++n_unread;
@@ -1277,10 +1288,49 @@ bool server_prompt_cache::open_store(const std::string & dir, const std::string 
     return true;
 }
 
-bool server_prompt_cache::save_to_store(const server_prompt & prompt, size_t state_size, const std::function<bool(uint8_t *)> & fill) {
-    if (!forget_contained(prompt)) {
+bool server_prompt_cache::starts_alike(const server_prompt & cached, const server_prompt & prompt) const {
+    if (cached.tokens.size() == 0) {
         return false;
     }
+    const thinking_tokens & think = cached.think_tokens;
+    if (think.exclude) {
+        const server_tokens a = cached.tokens.get_tokens_exclude_think(ctx, think);
+        const server_tokens b = prompt.tokens.get_tokens_exclude_think(ctx, think);
+        return a.size() > 0 && float(a.get_common_prefix(ctx, b).first) / a.size() >= 0.5f;
+    }
+    return float(cached.tokens.get_common_prefix(ctx, prompt.tokens).first) / cached.tokens.size() >= 0.5f;
+}
+
+bool server_prompt_cache::save_to_store(const server_prompt & prompt, size_t state_size, const std::function<bool(uint8_t *)> & fill,
+                                        int id_slot, llama_pos pos_max) {
+    // As alloc() does: nothing to do if the prompt is in the cache already, and the cached prompts that it
+    // contains are older states of it. Here they are removed once the new file is written, not before.
+    std::vector<std::list<server_prompt>::iterator> older;
+    {
+        auto tokens_ctx_shift = prompt.tokens.clone();
+        tokens_ctx_shift.discard_n_tokens(prompt.n_kept_prompt, prompt.n_discarded_prompt);
+        for (auto it = states.begin(); it != states.end(); ++it) {
+            const auto prefix = it->tokens.get_common_prefix(ctx, tokens_ctx_shift);
+            if (prefix.second == tokens_ctx_shift.size()) {
+                LLAMA_LOG_INFO("%s", " - prompt is already in the cache, skipping\n");
+                return false;
+            }
+            if (prefix.first == it->tokens.size()) {
+                older.push_back(it);
+            }
+        }
+    }
+    // the file this slot took the conversation from is an older state of it too, whatever its thinking tokens
+    for (auto it = states.begin(); it != states.end(); ++it) {
+        if (it->held_by == id_slot && std::find(older.begin(), older.end(), it) == older.end()) {
+            if (starts_alike(*it, prompt)) {
+                older.push_back(it);
+            } else {
+                it->held_by = -1; // the slot went on to another conversation
+            }
+        }
+    }
+
     // the checkpoints whose bytes are here; one that was put on a disk of its own stays with the slot
     std::vector<server_prompt_store::ckpt_in> ckpts;
     for (const auto & c : prompt.checkpoints) {
@@ -1294,11 +1344,27 @@ bool server_prompt_cache::save_to_store(const server_prompt & prompt, size_t sta
         { "begin",   prompt.think_tokens.begin },
         { "end",     prompt.think_tokens.end },
     };
+    meta["pos_max"] = pos_max;
+    const std::string meta_text = meta.dump();
+
     const int64_t t_start = ggml_time_us();
     server_prompt_store::entry e;
-    if (!store->write(meta.dump(), state_size, fill, ckpts, e)) {
-        LLAMA_LOG_WARN(" - the prompt is not kept: %s\n", store->error.c_str());
-        return false;
+    while (!store->write(meta_text, state_size, fill, ckpts, e)) {
+        // No room in the directory: the older states of this conversation go first, then the oldest prompt, and
+        // the file is tried again. Anything else: this prompt is not kept, the cache is as it was.
+        if (!store->no_room || states.empty()) {
+            LLAMA_LOG_WARN(" - the prompt is not kept: %s\n", store->error.c_str());
+            return false;
+        }
+        auto victim = older.empty() ? states.begin() : older.back();
+        LLAMA_LOG_INFO(" - %s: removing %s prompt of %d tokens (%.3f MiB)\n", store->error.c_str(),
+            older.empty() ? "the oldest" : "an older state of this", victim->n_tokens(), victim->size() / (1024.0 * 1024.0));
+        older.erase(std::remove(older.begin(), older.end(), victim), older.end());
+        erase(victim);
+    }
+    for (auto it : older) {
+        LLAMA_LOG_INFO(" - removing obsolete cached prompt with length %d\n", it->n_tokens());
+        erase(it);
     }
     e.meta.clear();
     auto & cur = states.emplace_back();
@@ -1307,6 +1373,7 @@ bool server_prompt_cache::save_to_store(const server_prompt & prompt, size_t sta
     cur.n_discarded_prompt = prompt.n_discarded_prompt;
     cur.think_tokens       = prompt.think_tokens;
     cur.file               = std::move(e);
+    cur.file_pos_max       = pos_max;
     LLAMA_LOG_INFO(" - written to %s with %zu checkpoints, %.3f MiB in %.2f ms\n", cur.file.path.c_str(), ckpts.size(),
         cur.size() / (1024.0 * 1024.0), (ggml_time_us() - t_start) / 1000.0);
     return true;

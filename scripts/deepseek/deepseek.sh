@@ -35,10 +35,13 @@
 #   CACHE_DIR  dossier où le serveur garde les conversations qu'il met de côté (son cache de prompts, limité
 #            à 100000 Mio). Vide par défaut : elles restent dans la mémoire du serveur et se perdent quand
 #            il s'arrête. Avec CACHE_DIR=/mnt/dscache/cache elles vont dans des fichiers sur un RAM disk,
-#            /mnt/dscache, que ce script monte : le serveur les retrouve à son redémarrage, et à son arrêt
-#            par Ctrl+C il y ajoute la conversation en cours. Elles ne survivent pas à un redémarrage de la
-#            machine. Les fichiers ne sont lisibles que par votre compte.
-#   CACHE_DISK taille du RAM disk /mnt/dscache, 120G par défaut (il n'occupe que ce qu'on y écrit)
+#            /mnt/dscache, que ce script monte pour votre compte seul : le serveur les retrouve à son
+#            redémarrage. À son arrêt (un seul Ctrl+C : il finit d'abord la réponse en cours, un deuxième
+#            l'arrête sans rien écrire) il y ajoute la conversation en cours. S'il est tué ou plante, une
+#            conversation revient dans l'état où elle a été écrite la dernière fois, et la suite se relit.
+#            Rien ne survit à un redémarrage de la machine.
+#   CACHE_DISK taille du RAM disk /mnt/dscache, 120G par défaut (il n'occupe que ce qu'on y écrit). Quand
+#            il est plein, le serveur retire les conversations les plus anciennes.
 #
 # Le serveur lancé est celui de la version dans laquelle se trouve ce script ; un dossier ik_llama en
 # premier argument en choisit une autre.
@@ -121,7 +124,7 @@ monter /mnt/ds1     size=300G,huge=always,mpol=bind:1
 mkdir -p /mnt/ramdisk/model
 # le cache de prompts du serveur, s'il est demandé sur son RAM disk (le serveur crée le dossier lui-même)
 case $CACHE_DIR in
-    /mnt/dscache|/mnt/dscache/*) monter /mnt/dscache "size=$CACHE_DISK,mpol=interleave" ;;
+    /mnt/dscache|/mnt/dscache/*) monter /mnt/dscache "size=$CACHE_DISK,mpol=interleave,mode=0700,uid=$(id -u),gid=$(id -g)" ;;
 esac
 
 # --- chargement (ne recopie que ce qui manque) -----------------------------
