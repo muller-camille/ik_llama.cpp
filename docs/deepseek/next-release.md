@@ -1,19 +1,17 @@
-since: rhel8-b5390
+since: rhel8-b5397
 
-**Fewer threads waiting while a token is generated.** Not measured on the server yet: the profile will say.
+**The routed experts are computed as before `rhel8-b5397` again.** The run of `rhel8-b5397` on the 2-socket server measured what it changed:
 
-- **The shared expert** (`ffn_up_shexp`, its up and gate matrices computed together): a thread that is done with its rows takes rows the others have not started, as the other large matrices have done since `rhel8-b5317`. In the profile of `rhel8-b5390` the threads were busy 82% of this node for a token, against 94 to 97% in the matrices that share their rows.
-- **The routed experts** (`ffn_up_exps`, `ffn_down_exps`): their chunks were already handed out one by one; a thread that finds none left now takes the end of the chunks the others are still on. The threads were busy 91 to 93% of these nodes.
-- These three nodes are 17 of the 45.5 ms of a token. If their threads get as busy as in the other matrices, a token takes up to 1 ms less, 2%: an estimate from the profile, to be measured (`busy` of `FUSED_UP_GATE`, `MOE_FUSED_UP_GATE` and `MUL_MAT_ID` in the result of `profil.sh`).
-- Every value is, bit for bit, the one it was with each thread on its own rows: `test-share-rows` compares them for 2 to 64 threads and 1 to 9 tokens, with experts in the format of this model (`MXFP4_R8`) and in `Q8_0_R8`. A prompt batch is computed as before. `GGML_SHARE_ROWS=0` turns the sharing off, to compare.
+| Node, for one token | `rhel8-b5390` | `rhel8-b5397` | Threads busy |
+|---|---|---|---|
+| Shared expert (`ffn_up_shexp`) | 3.09 ms | 2.91 ms | 83% to 93% |
+| Routed experts, up and gate, then down | 13.95 ms | 13.83 ms | 91-93% to 96-97% |
+| The whole graph | 45.46 ms | 45.48 ms | |
 
-**Measured with `rhel8-b5390` on the 2-socket server**, now in the README and in [measurements.md](https://github.com/muller-camille/ik_llama.cpp/blob/main/docs/deepseek/measurements.md):
+- In the shared expert the threads take rows from each other and the node is shorter: that stays.
+- In the routed experts the threads were busier and the nodes no shorter (the down matrices were slower): the memory sets the speed there. That part is taken out; these nodes are the code of `rhel8-b5390` again.
+- Tokens/s did not move beyond what two runs differ by (21.73 and 21.73 after the long prompt, 22.78 and 23.11 after the short one), and the texts are the same. The estimate of up to 1 ms per token was too high.
 
-- `GGML_AMX_ATTN=1` reads a prompt of 12,616 tokens at 452 tokens/s instead of 359, and the generation does not change. It stays off unless asked: the text generated after the same prompt is another one, and whether the answers are as good has not been compared. With `deepseek.sh`, a line `GGML_AMX_ATTN=1` in `~/.deepseek.conf` turns it on.
-- No other distance or cache level of the weight prefetch (`IQK_PREFETCH`) is faster than the current one.
+**`profil.sh` compares settings of the draft.** The drafter stops a draft at the first token it is less than 75% sure of, a default that was never compared with others on this server. `SPEC=dspark:n_max=4,p_min=0.5` among `VARS` is a pass with that setting, with the duration of a draft step and the tokens it gives in the final table; `SANS_DRAFTER=0` leaves out the passes without the draft.
 
-**Around the binaries**
-
-- **Release notes**: the notes of a release now hold only what it changes, as here. What every release used to repeat (what a package holds, how to start the server by hand) is in [docs/deepseek/setup.md](https://github.com/muller-camille/ik_llama.cpp/blob/main/docs/deepseek/setup.md).
-- **README**: rewritten around the project, DeepSeek-V4.1 on a 2-socket CPU server: what it does now against before, how to run it, how to measure it, and one line per change. The long tables moved to `docs/deepseek/` (changes in detail, release by release, measurements, setup, DeepSeek Harness), and the README of ik_llama.cpp is in `README-ik_llama.cpp.md`.
-- **Before and after**: a diagram at the top of the README, with the figures measured on the server: 9.4 to 22.9 tokens/s generated, 25.6 to 29.6 with the draft, 236 to 361 tokens/s for a prompt, a conversation of 10,547 tokens back in 0.5 s after a restart.
+The measurements are in [measurements.md](https://github.com/muller-camille/ik_llama.cpp/blob/main/docs/deepseek/measurements.md).

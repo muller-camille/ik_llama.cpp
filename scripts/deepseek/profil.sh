@@ -62,11 +62,16 @@
 #              poids (4096 par défaut), une deuxième demande plus loin, vers le cache L2 (0 = aucune), et le
 #              niveau de la première (0 = cache L1, par défaut ; 1 = L2 ; 3 = sans passer par L2).
 #              IQK_PREFETCH=1024, IQK_PREFETCH=4096,32768 ou IQK_PREFETCH=16384,0,1 par exemple
+#              Le réglage du drafter se compare de la même façon : SPEC=dspark:n_max=4,p_min=0.5 par exemple
+#              (n_max : la longueur d'un brouillon ; p_min : le drafter coupe un brouillon au premier token
+#              dont il est sûr à moins de p_min, 0,75 si rien n'est dit). Ces passes ne se font qu'avec le
+#              drafter, et le tableau final dit pour chacune la durée d'un pas et les tokens qu'il donne.
 #              (VARS="GGML_INDEXER_512=0" n'en essaie qu'un ; VARS= ne mesure que les nombres de threads)
 #   ESSAIS     requêtes par passe, 5 par défaut ; LECTURES, lectures d'un texte neuf parmi elles, 3 ;
 #              N_PREDICT, tokens produits par requête, 200
 #   CONTEXTE   taille du texte long en tokens, 16000 par défaut ; CONTEXTE=0 saute les passes au texte long
 #   UBATCH     tokens du prompt lus ensemble dans toutes les passes, 2048 par défaut comme deepseek.sh
+#   SANS_DRAFTER  0 = seulement les passes avec le drafter (pour comparer ses réglages)
 #   DRAFT      le drafter : un chemin, ou un nom de fichier cherché à côté du modèle (celui de
 #              ~/.deepseek.conf) ; vide = sans drafter ; par défaut le dspark-*-R8.gguf à côté du modèle,
 #              sinon le dspark-*.gguf
@@ -288,7 +293,7 @@ finir() {
         echo "moyenne, plus bas et plus haut des essais ; draft : part acceptée des tokens du drafter sur la passe ;"
         echo "ms/pas : durée d'un pas du drafter (sa proposition et la vérification) ; tok/pas : tokens produits par pas."
         echo "Avec le drafter, sortie = 1000 x tok/pas / ms/pas. threads a/b : a pour un token seul, b pour les lots."
-        printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s\n' threads drafter contexte variante lus lecture sortie min max draft ms/pas tok/pas
+        printf '%7s  %-7s  %-8s  %-30s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s\n' threads drafter contexte variante lus lecture sortie min max draft ms/pas tok/pas
         printf '%s\n' "${RESUME[@]}"
         conclure
     } | tee -a "$OUT"
@@ -304,19 +309,30 @@ dire() { echo "$@" | tee -a "$OUT"; }
 DRAFTERS=("")
 NOM_DRAFT=aucun
 if [ -n "$DRAFT" ]; then
+    # SANS_DRAFTER=0 : seulement les passes avec le drafter
+    [ "${SANS_DRAFTER:-1}" != 0 ] || DRAFTERS=()
     DRAFTERS+=("$DRAFT")
     NOM_DRAFT=$(basename "$DRAFT")
 fi
 CONTEXTES="0"
 [ "$CONTEXTE" -le 0 ] || CONTEXTES="0 $CONTEXTE"
-N_VARS=$(set -- $VARS; echo $#)
+# un réglage du drafter (SPEC=...) ne se mesure qu'avec lui : une passe, et aucune sans drafter
+N_VARS=0
+for var in $VARS; do
+    for draft in "${DRAFTERS[@]}"; do
+        case $var in
+            SPEC=*) [ -n "$draft" ] || continue ;;
+        esac
+        N_VARS=$((N_VARS + 1))
+    done
+done
 N_THREADS=$(set -- $THREADS; echo $#)
-N_PASSES=$(( ${#DRAFTERS[@]} * (N_THREADS * $(set -- $CONTEXTES; echo $#) + N_VARS) ))
+N_PASSES=$(( ${#DRAFTERS[@]} * N_THREADS * $(set -- $CONTEXTES; echo $#) + N_VARS ))
 # durée : par passe le chargement et les essais (20 tokens/s), plus les lectures du texte long (250 tokens/s)
 S_COURTE=$(( 40 + ESSAIS*N_PREDICT/20 ))
 S_LONGUE=$(( S_COURTE + LECTURES*CONTEXTE/250 ))
 if [ "$CONTEXTE" -gt 0 ]; then
-    S_TOTAL=$(( ${#DRAFTERS[@]} * (N_THREADS*(S_COURTE + S_LONGUE) + N_VARS*S_LONGUE) ))
+    S_TOTAL=$(( ${#DRAFTERS[@]} * N_THREADS*(S_COURTE + S_LONGUE) + N_VARS*S_LONGUE ))
 else
     S_TOTAL=$(( N_PASSES*S_COURTE ))
 fi
@@ -363,7 +379,7 @@ remplir() {
 # resumer <threads> <drafter ou vide> <contexte> <réglage> <tokens lus> <lecture> <sortie> <min> <max> <acceptés>
 # <ms par pas> <tokens par pas> : la ligne de la passe dans le tableau final
 resumer() {
-    RESUME+=("$(printf '%7s  %-7s  %-8s  %-22s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s' "$1" "$([ -n "$2" ] && echo oui || echo non)" \
+    RESUME+=("$(printf '%7s  %-7s  %-8s  %-30s  %6s  %8s  %7s  %7s  %7s  %5s  %7s  %7s' "$1" "$([ -n "$2" ] && echo oui || echo non)" \
         "$([ "$3" -gt 0 ] && echo long || echo court)" "${4:--}" "$5" "$6" "$7" "$8" "$9" "${10}" "${11:--}" "${12:--}")")
 }
 
@@ -387,7 +403,12 @@ passe() {
         */*) args+=(-tb "${t#*/}") ;;
     esac
     [ -z "$MIRROR" ] || args+=(--numa-mirror "$MIRROR")
-    [ -z "$draft" ]  || args+=(-md "$draft" --spec-type "$SPEC")
+    # le réglage du drafter : celui de SPEC, ou d'un SPEC=<réglage> parmi les réglages
+    local spec=$SPEC
+    case $var in
+        SPEC=*) spec=${var#SPEC=} ;;
+    esac
+    [ -z "$draft" ]  || args+=(-md "$draft" --spec-type "$spec")
     # la taille des lots du prompt, une option du serveur : celle de UBATCH, ou d'un UBATCH=<n> parmi les réglages
     v=$UBATCH
     case $var in
@@ -499,13 +520,13 @@ passe() {
         dire "pages du modèle, serveur en marche : $(grep -E '^(ShmemHugePages|ShmemPmdMapped)' /proc/meminfo | tr -s ' ' | paste -sd ';')"
     fi
     arreter   # le tableau est écrit à l'arrêt du serveur
-    grep -E "draft acceptance rate|statistics ${SPEC%%:*}:" "$LOG" | tail -2 >> "$OUT" || true
+    grep -E "draft acceptance rate|statistics ${spec%%:*}:" "$LOG" | tail -2 >> "$OUT" || true
     if [ -n "$draft" ]; then
         accepte=$(grep -o "draft acceptance rate = [0-9.]*" "$LOG" | tail -1 | awk '{ printf "%.0f%%", 100*$NF }' || true)
         accepte=${accepte:--}
         # Sur toute la passe : les pas du drafter, ce qu'ils durent et ce qu'ils donnent. Les tokens/s en sont le
         # quotient ; la durée d'un pas tient au réglage, les tokens par pas à ce que le modèle accepte du texte.
-        stat=$(grep "statistics ${SPEC%%:*}:" "$LOG" | tail -1 || true)
+        stat=$(grep "statistics ${spec%%:*}:" "$LOG" | tail -1 || true)
         pas=$(echo "$stat" | grep -o '#gen drafts = [0-9]*' | grep -o '[0-9]*$' || true)
         gen=$(echo "$stat" | grep -o '#gen tokens = [0-9]*' | grep -o '[0-9]*$' || true)
         acc=$(echo "$stat" | grep -o '#acc tokens = [0-9]*' | grep -o '[0-9]*$' || true)
@@ -549,6 +570,9 @@ done
 # 3. un réglage changé à la fois, après le texte long (la question courte si CONTEXTE=0)
 for var in $VARS; do
     for draft in "${DRAFTERS[@]}"; do
+        case $var in
+            SPEC=*) [ -n "$draft" ] || continue ;;
+        esac
         passe "$(reference "$draft")" "$draft" "${CONTEXTES##* }" "$var" || true
     done
 done

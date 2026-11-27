@@ -103,6 +103,28 @@ What a batch is made of once the attention goes through AMX:
 
 **The experts**, with the count of this build (an expert that several tokens picked is counted once): for a token alone the up and gate matrices are read at 326 GB/s and the down matrices at 320; for the 5 tokens that end a prompt, at 351 and 337 GB/s. The 543 GB/s that the profile of `rhel8-b5379` showed when a draft is verified came from counting an expert once per token. For comparison `output.weight`, one matrix of 0.7 GB read from end to end, is read at 450 GB/s.
 
+## Rows shared in the experts (`rhel8-b5397`)
+
+32 threads, no draft, 3 tries per pass. `rhel8-b5397` let the threads take rows from each other in the shared expert and at the end of the chunks of the routed experts. Time of these nodes for a token (the 40 layers), and how busy the threads were; after the long prompt both builds have the attention through AMX and generate the same text:
+
+| Node, one token per graph | `rhel8-b5390` | `rhel8-b5397` | `rhel8-b5397`, `GGML_SHARE_ROWS=0` |
+|---|---|---|---|
+| Shared expert, up and gate (`ffn_up_shexp`) | 3.09 ms, 83% | 2.91 ms, 93% | 3.09 ms, 83% |
+| Routed experts, up and gate (`ffn_up_exps`) | 9.26 ms, 91% | 9.03 ms, 96% | 9.14 ms, 92% |
+| Routed experts, down (`ffn_down_exps`) | 4.69 ms, 93% | 4.80 ms, 97% | 4.73 ms, 92% |
+| The whole graph | 45.46 ms | 45.48 ms | 45.90 ms |
+| Tokens/s after the prompt of 12,616 tokens | 21.73 | 21.73 | 21.55 |
+
+After a short prompt: 3.22 to 3.08 ms for the shared expert, 9.19 to 9.09 and 4.86 to 4.92 for the routed experts, 43.52 to 42.90 ms for the graph, 22.78 to 23.11 tokens/s.
+
+- **The shared expert gains**: 0.14 to 0.19 ms per token, below every one of the nine passes of `rhel8-b5390` (3.09 to 3.33 ms).
+- **The routed experts do not**: their threads are busier, as intended, and the two nodes together take 13.83 ms instead of 13.95, within what two runs differ by; the down matrices are slower in both comparisons. The memory sets the speed there: when some threads are done, the others read faster. This part is taken out again in the next release.
+- **Tokens/s do not move** beyond the 3% that the runs of one build differ by. The estimate made from the profile of `rhel8-b5390`, up to 1 ms per token, was too high.
+- **The values are the same**: the texts have the fingerprints of `rhel8-b5390`, with the sharing and without it.
+- **The attention through AMX**, on in every pass of this run: the prompt read at 455.0 and 454.2 tokens/s (452.2 with `rhel8-b5390`).
+
+Not explained: in the graphs of 5 tokens that end a prompt (2 to 6 per pass), one thread was held up 25 to 65 ms in an expert node, once in each of the three passes, with the sharing on and with it off; the threads were then busy 46 to 86% of that node instead of 97%. None of the ten passes of the run of `rhel8-b5390` shows it in these graphs, where single nodes of the graphs of one token do show such delays (a node at 90% instead of 96 in one pass). With so few graphs it can be chance; the graphs a draft is verified with are of this kind, and a run with the draft has hundreds of them.
+
 ## Where the time goes
 
 ```
