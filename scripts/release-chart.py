@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draws the charts of the README section "Release by release", from the figures measured with
+"""Draws the charts of docs/deepseek/releases.md ("Release by release"), from the figures measured with
 DeepSeek-V4.1-Flash on the 2-socket server:
 
   - the tokens per second generated, one point per release that was measured;
@@ -8,7 +8,7 @@ DeepSeek-V4.1-Flash on the 2-socket server:
     python3 scripts/release-chart.py
 
 writes media/deepseek-releases-{light,dark}.svg and media/deepseek-prompt-{light,dark}.svg. To add a release,
-add a row to RELEASES below (and to the table of the README) and run it again.
+add a row to RELEASES below (and to the table of docs/deepseek/releases.md) and run it again.
 """
 
 import os

@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 968" width="920" height="968" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">DeepSeek-V4.1 on the 2-socket server, before and after</title>
+<desc id="d">Before and after, stage by stage. Generating: 9.4 tokens/s before, 22.9 tokens/s after; Generating with the draft: 25.6 tokens/s before, 29.6 tokens/s after; Reading a prompt: 236 tokens/s before, 361 tokens/s after; Starting the server again: 29 s  before, 0.5 s  after; A request larger than the context: 6-7 min  before, At once  after; Agents and tools: A tool call was held to the wrong form of its schema: the model could not write a Metabase query. before, Tool arguments are held as JSON Schema means them, the fields of DeepSeek's API are understood, and DeepSeek Harness runs on the server. after. The table under the diagram has the same figures.</desc>
+<rect x="0.5" y="0.5" width="919" height="967" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<text x="24" y="32" font-size="16" fill="#0b0b0b" font-weight="600">DeepSeek-V4.1 on the 2-socket server, before and after</text>
+<text x="24" y="52" font-size="12" fill="#52514e">Same machine and same model files: 2 x 16 Xeon cores, 1 TB of RAM, CPU only</text>
+<rect x="200" y="76" width="12" height="12" rx="3" fill="#898781"/>
+<text x="220" y="86" font-size="13" fill="#0b0b0b" font-weight="600">Before</text>
+<rect x="500" y="76" width="12" height="12" rx="3" fill="#2a78d6"/>
+<text x="520" y="86" font-size="13" fill="#0b0b0b" font-weight="600">After</text>
+<line x1="24" y1="98" x2="896" y2="98" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="128" font-size="13" fill="#0b0b0b" font-weight="600">The machine</text>
+<text x="24" y="146" font-size="11" fill="#898781">where the weights and the</text>
+<text x="24" y="162" font-size="11" fill="#898781">conversations are</text>
+<rect x="200" y="112" width="124" height="40" rx="5" fill="none" stroke="#898781" stroke-width="1.5"/>
+<text x="262.0" y="130" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">Socket 0</text>
+<text x="262.0" y="145" font-size="11" fill="#52514e" text-anchor="middle">16 cores</text>
+<rect x="338" y="112" width="124" height="40" rx="5" fill="none" stroke="#898781" stroke-width="1.5"/>
+<text x="400.0" y="130" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">Socket 1</text>
+<text x="400.0" y="145" font-size="11" fill="#52514e" text-anchor="middle">16 cores</text>
+<rect x="200" y="178" width="124" height="36" rx="5" fill="#898781" fill-opacity="0.14" stroke="#898781" stroke-width="1.5"/>
+<text x="262" y="194" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">The weights</text>
+<text x="262" y="208" font-size="11" fill="#52514e" text-anchor="middle">277 GiB</text>
+<path d="M262 152 V178" fill="none" stroke="#898781" stroke-width="2" stroke-linecap="round"/>
+<path d="M400 152 V196 H324" fill="none" stroke="#898781" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="332" y="214" font-size="11" fill="#898781">half the threads read</text>
+<text x="332" y="228" font-size="11" fill="#898781">across the machine</text>
+<rect x="200" y="248" width="262" height="30" rx="5" fill="none" stroke="#898781" stroke-width="1.5"/>
+<text x="331" y="267" font-size="11" fill="#52514e" text-anchor="middle">Conversations: lost when the server stops</text>
+<rect x="500" y="112" width="190" height="40" rx="5" fill="none" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="595.0" y="130" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">Socket 0</text>
+<text x="595.0" y="145" font-size="11" fill="#52514e" text-anchor="middle">16 cores</text>
+<rect x="500" y="178" width="190" height="36" rx="5" fill="#2a78d6" fill-opacity="0.14" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="595" y="194" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">A copy of the weights</text>
+<text x="595" y="208" font-size="11" fill="#52514e" text-anchor="middle">277 GiB, on a RAM disk</text>
+<path d="M595 152 V178" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+<rect x="706" y="112" width="190" height="40" rx="5" fill="none" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="801.0" y="130" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">Socket 1</text>
+<text x="801.0" y="145" font-size="11" fill="#52514e" text-anchor="middle">16 cores</text>
+<rect x="706" y="178" width="190" height="36" rx="5" fill="#2a78d6" fill-opacity="0.14" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="801" y="194" font-size="12" fill="#0b0b0b" font-weight="600" text-anchor="middle">A copy of the weights</text>
+<text x="801" y="208" font-size="11" fill="#52514e" text-anchor="middle">277 GiB, on a RAM disk</text>
+<path d="M801 152 V178" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+<text x="698.0" y="232" font-size="11" fill="#898781" text-anchor="middle">every thread reads the copy of its own socket</text>
+<rect x="500" y="248" width="396" height="30" rx="5" fill="none" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="698.0" y="267" font-size="11" fill="#52514e" text-anchor="middle">Conversations: files on a RAM disk, kept when the server restarts</text>
+<line x1="24" y1="284" x2="896" y2="284" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="312" font-size="13" fill="#0b0b0b" font-weight="600">Generating</text>
+<text x="24" y="330" font-size="11" fill="#898781">tokens per second,</text>
+<text x="24" y="346" font-size="11" fill="#898781">without a draft</text>
+<rect x="200" y="298" width="3" height="66" rx="1.5" fill="#898781"/>
+<text x="214" y="322" font-size="26" font-weight="600" fill="#0b0b0b">9.4<tspan dx="6" font-size="12" font-weight="400" fill="#52514e">tokens/s</tspan></text>
+<text x="214" y="344" font-size="12" fill="#52514e">All the weights in the memory of one</text>
+<text x="214" y="360" font-size="12" fill="#52514e">socket.</text>
+<rect x="500" y="298" width="3" height="98" rx="1.5" fill="#2a78d6"/>
+<text x="514" y="322" font-size="26" font-weight="600" fill="#0b0b0b">22.9<tspan dx="6" font-size="12" font-weight="400" fill="#52514e">tokens/s</tspan></text>
+<text x="514" y="344" font-size="12" fill="#52514e">One copy of the weights per socket (17.1). Then the</text>
+<text x="514" y="360" font-size="12" fill="#52514e">weights are asked for ahead of their use, the small</text>
+<text x="514" y="376" font-size="12" fill="#52514e">steps of a token run on one thread, and there is one</text>
+<text x="514" y="392" font-size="12" fill="#52514e">thread per core.</text>
+<path d="M472 314 H488 M483 309 L488 314 L483 319" fill="none" stroke="#898781" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="24" y1="410" x2="896" y2="410" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="438" font-size="13" fill="#0b0b0b" font-weight="600">Generating with the</text>
+<text x="24" y="454" font-size="13" fill="#0b0b0b" font-weight="600">draft</text>
+<text x="24" y="472" font-size="11" fill="#898781">DSpark, n_max=4</text>
+<rect x="200" y="424" width="3" height="66" rx="1.5" fill="#898781"/>
+<text x="214" y="448" font-size="26" font-weight="600" fill="#0b0b0b">25.6<tspan dx="6" font-size="12" font-weight="400" fill="#52514e">tokens/s</tspan></text>
+<text x="214" y="470" font-size="12" fill="#52514e">The first measurement, on one</text>
+<text x="214" y="486" font-size="12" fill="#52514e">subject.</text>
+<rect x="500" y="424" width="3" height="98" rx="1.5" fill="#2a78d6"/>
+<text x="514" y="448" font-size="26" font-weight="600" fill="#0b0b0b">29.6<tspan dx="6" font-size="12" font-weight="400" fill="#52514e">tokens/s</tspan></text>
+<text x="514" y="470" font-size="12" fill="#52514e">Mean of five subjects, from 27.2 to 33.6 (31.5 on the</text>
+<text x="514" y="486" font-size="12" fill="#52514e">subject of the first measurement). The tokens of a draft</text>
+<text x="514" y="502" font-size="12" fill="#52514e">are verified by all the threads, each on the rows it</text>
+<text x="514" y="518" font-size="12" fill="#52514e">sees.</text>
+<path d="M472 440 H488 M483 435 L488 440 L483 445" fill="none" stroke="#898781" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="24" y1="536" x2="896" y2="536" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="564" font-size="13" fill="#0b0b0b" font-weight="600">Reading a prompt</text>
+<text x="24" y="582" font-size="11" fill="#898781">tokens per second</text>
+<rect x="200" y="550" width="3" height="50" rx="1.5" fill="#898781"/>
+<text x="214" y="574" font-size="26" font-weight="600" fill="#0b0b0b">236<tspan dx="6" font-size="12" font-weight="400" fill="#52514e">tokens/s</tspan></text>
+<text x="214" y="596" font-size="12" fill="#52514e">Batches of 512 tokens.</text>
+<rect x="500" y="550" width="3" height="66" rx="1.5" fill="#2a78d6"/>
+<text x="514" y="574" font-size="26" font-weight="600" fill="#0b0b0b">361<tspan dx="6" font-size="12" font-weight="400" fill="#52514e">tokens/s</tspan></text>
+<text x="514" y="596" font-size="12" fill="#52514e">Batches of 2048 tokens (326), then their matrix products</text>
+<text x="514" y="612" font-size="12" fill="#52514e">through Intel AMX, and the indexer in AVX-512.</text>
+<path d="M472 566 H488 M483 561 L488 566 L483 571" fill="none" stroke="#898781" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="24" y1="630" x2="896" y2="630" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="658" font-size="13" fill="#0b0b0b" font-weight="600">Starting the server</text>
+<text x="24" y="674" font-size="13" fill="#0b0b0b" font-weight="600">again</text>
+<text x="24" y="692" font-size="11" fill="#898781">a conversation of 10,547</text>
+<text x="24" y="708" font-size="11" fill="#898781">tokens</text>
+<rect x="200" y="644" width="3" height="82" rx="1.5" fill="#898781"/>
+<text x="214" y="668" font-size="26" font-weight="600" fill="#0b0b0b">29 s</text>
+<text x="214" y="690" font-size="12" fill="#52514e">Read again from its first token</text>
+<text x="214" y="706" font-size="12" fill="#52514e">(computed: 10,547 tokens at 361</text>
+<text x="214" y="722" font-size="12" fill="#52514e">tokens/s).</text>
+<rect x="500" y="644" width="3" height="82" rx="1.5" fill="#2a78d6"/>
+<text x="514" y="668" font-size="26" font-weight="600" fill="#0b0b0b">0.5 s</text>
+<text x="514" y="690" font-size="12" fill="#52514e">Brought back from its file on a RAM disk. After a kill</text>
+<text x="514" y="706" font-size="12" fill="#52514e">it comes back as it was last saved, and what came after</text>
+<text x="514" y="722" font-size="12" fill="#52514e">is read again.</text>
+<path d="M472 660 H488 M483 655 L488 660 L483 665" fill="none" stroke="#898781" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="24" y1="740" x2="896" y2="740" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="768" font-size="13" fill="#0b0b0b" font-weight="600">A request larger than</text>
+<text x="24" y="784" font-size="13" fill="#0b0b0b" font-weight="600">the context</text>
+<text x="24" y="802" font-size="11" fill="#898781">131,072 tokens of context</text>
+<rect x="200" y="754" width="3" height="66" rx="1.5" fill="#898781"/>
+<text x="214" y="778" font-size="26" font-weight="600" fill="#0b0b0b">6-7 min</text>
+<text x="214" y="800" font-size="12" fill="#52514e">Refused, then read all the same,</text>
+<text x="214" y="816" font-size="12" fill="#52514e">while the next request waited.</text>
+<rect x="500" y="754" width="3" height="66" rx="1.5" fill="#2a78d6"/>
+<text x="514" y="778" font-size="26" font-weight="600" fill="#0b0b0b">At once</text>
+<text x="514" y="800" font-size="12" fill="#52514e">Refused without being read. The conversation the server</text>
+<text x="514" y="816" font-size="12" fill="#52514e">was holding is kept.</text>
+<path d="M472 770 H488 M483 765 L488 770 L483 775" fill="none" stroke="#898781" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="24" y1="834" x2="896" y2="834" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="862" font-size="13" fill="#0b0b0b" font-weight="600">Agents and tools</text>
+<text x="24" y="880" font-size="11" fill="#898781">DeepSeek's API, Metabase</text>
+<rect x="200" y="848" width="3" height="48" rx="1.5" fill="#898781"/>
+<text x="214" y="860" font-size="12" fill="#52514e">A tool call was held to the wrong</text>
+<text x="214" y="876" font-size="12" fill="#52514e">form of its schema: the model could</text>
+<text x="214" y="892" font-size="12" fill="#52514e">not write a Metabase query.</text>
+<rect x="500" y="848" width="3" height="48" rx="1.5" fill="#2a78d6"/>
+<text x="514" y="860" font-size="12" fill="#52514e">Tool arguments are held as JSON Schema means them, the</text>
+<text x="514" y="876" font-size="12" fill="#52514e">fields of DeepSeek's API are understood, and DeepSeek</text>
+<text x="514" y="892" font-size="12" fill="#52514e">Harness runs on the server.</text>
+<path d="M472 864 H488 M483 859 L488 864 L483 869" fill="none" stroke="#898781" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="24" y1="910" x2="896" y2="910" stroke="#e1e0d9" stroke-width="1"/>
+<text x="24" y="932" font-size="11" fill="#898781">DeepSeek-V4.1-Flash UD-Q4_K_XL. Before: the first builds, 19 to 21 Nov. After: rhel8-b5379 to rhel8-b5390, 26 and 27 Nov. Generation: means</text>
+<text x="24" y="948" font-size="11" fill="#898781">of 5 requests of 200 tokens after a short prompt, 32 threads (64 for the 25.6). Prompts read: 3,159 to 15,761 tokens before, 12,616 after.</text>
+</svg>

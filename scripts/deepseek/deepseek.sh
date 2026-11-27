@@ -42,6 +42,12 @@
 #            Rien ne survit à un redémarrage de la machine.
 #   CACHE_DISK taille du RAM disk /mnt/dscache, 120G par défaut (il n'occupe que ce qu'on y écrit). Quand
 #            il est plein, le serveur retire les conversations les plus anciennes.
+#   GGML_AMX_ATTN  1 = l'attention d'un prompt passe elle aussi par les tuiles AMX du processeur. Mesuré avec
+#            rhel8-b5390 : un prompt de 12 616 tokens lu à 452 tokens/s au lieu de 359, la production de
+#            texte inchangée. Ce n'est pas le réglage par défaut : le calcul y est arrondi à 8 bits
+#            significatifs, le texte produit après un même prompt n'est plus le même, et la qualité des
+#            réponses n'a pas été comparée. Ce n'est pas un réglage de ce script mais une variable du
+#            serveur : comme toute ligne NOM=valeur de ~/.deepseek.conf, elle lui est passée telle quelle.
 #
 # Le serveur lancé est celui de la version dans laquelle se trouve ce script ; un dossier ik_llama en
 # premier argument en choisit une autre.
