@@ -19390,9 +19390,11 @@ static void ggml_mul_mat_share_run(const struct ggml_compute_params * params, co
 // tokens. A row must get the same value whoever computes it, the one it had with every thread on its own rows,
 // and two things depend on the rows a call is given: the activation takes 16 values at a time, then 8, then one
 // by one, and for several tokens a kernel can take another way for a call that is not a multiple of 16 rows.
-// A range of rows goes through the kernels in tiles of 64 rows from its first row. So the units are 16 rows
-// from the first row of a range, and when the range is not a multiple of 16 rows, its last tile is one unit,
-// computed in a call of its own.
+// The up and gate product gives a range of rows to the kernels in tiles of 64 rows from its first row. So the
+// units are 16 rows from the first row of a range, and when the range is not a multiple of 16 rows, its last
+// tile is one unit, computed in a call of its own. The plain product (the down matrices of the experts) gives
+// the whole range in one call when there are fewer tokens than it has kernels: there a range that is not a
+// multiple of 16 rows is not shared at all, see ggml_compute_forward_mul_mat_id.
 #define GGML_SHARE_UNIT_ROWS 16
 #define GGML_SHARE_TILE_ROWS 64 // k_x_step of mul_mat_NxM and mul_mat_up_gate_NxM
 
@@ -19896,11 +19898,14 @@ static void ggml_compute_forward_mul_mat_id(
 
             const char * src0_cur = (const char *) ggml_numa_local(src0->data, ith) + cur_a*nb02;
 
-            // one of the last chunks: in units, and what is left of it is for the others to take
+            // One of the last chunks: in units, and what is left of it is for the others to take. Not a chunk
+            // that is not a multiple of 16 rows: iqk_mul_mat_moe() gives it to the kernel in one call when the
+            // expert has fewer tokens than there are kernels, and for 2 to 7 tokens the Q8_0_R8 kernel then
+            // takes another way for all its rows, which does not round like the one that calls of 16 rows get.
             int64_t r0 = 0, r1 = 0;
             if (share && chunk_id + nth >= total_chunks &&
                 ggml_expert_chunk_rows(ne01, iqk_share_unit_rows(ne01, matrix_row_counts[cur_a], ne00, src0->type, vec_dot_type),
-                        local_chunk, chunks_per_expert, &r0, &r1)) {
+                        local_chunk, chunks_per_expert, &r0, &r1) && (r1 - r0) % GGML_SHARE_UNIT_ROWS == 0) {
                 const int64_t n_unit = ggml_share_n_units(r1 - r0);
                 iqk_share_open(share_slots, ith, (uint32_t)chunk_id, 0, (uint32_t)n_unit);
                 const int take = ggml_expert_share_take(n_unit, true);

@@ -5,7 +5,7 @@ since: rhel8-b5390
 - **The shared expert** (`ffn_up_shexp`, its up and gate matrices computed together): a thread that is done with its rows takes rows the others have not started, as the other large matrices have done since `rhel8-b5317`. In the profile of `rhel8-b5390` the threads were busy 82% of this node for a token, against 94 to 97% in the matrices that share their rows.
 - **The routed experts** (`ffn_up_exps`, `ffn_down_exps`): their chunks were already handed out one by one; a thread that finds none left now takes the end of the chunks the others are still on. The threads were busy 91 to 93% of these nodes.
 - These three nodes are 17 of the 45.5 ms of a token. If their threads get as busy as in the other matrices, a token takes up to 1 ms less, 2%: an estimate from the profile, to be measured (`busy` of `FUSED_UP_GATE`, `MOE_FUSED_UP_GATE` and `MUL_MAT_ID` in the result of `profil.sh`).
-- Every value is, bit for bit, the one it was with each thread on its own rows: `test-share-rows` compares them for 2 to 64 threads and 1 to 9 tokens. A prompt batch is computed as before. `GGML_SHARE_ROWS=0` turns the sharing off, to compare.
+- Every value is, bit for bit, the one it was with each thread on its own rows: `test-share-rows` compares them for 2 to 64 threads and 1 to 9 tokens, with experts in the format of this model (`MXFP4_R8`) and in `Q8_0_R8`. A prompt batch is computed as before. `GGML_SHARE_ROWS=0` turns the sharing off, to compare.
 
 **Measured with `rhel8-b5390` on the 2-socket server**, now in the README and in [measurements.md](https://github.com/muller-camille/ik_llama.cpp/blob/main/docs/deepseek/measurements.md):
 
