@@ -111,6 +111,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 | Server | A request larger than the context is refused without being read | read for 6 to 7 minutes | |
 | Clients | The fields of DeepSeek's API, tool arguments as JSON Schema means them, Unsloth's chat template recognized | a model could not write a Metabase query | |
 | Loading | The GGUF files of upstream llama.cpp load as they are, engram table and DSpark draft included | | |
+| Draft | The DSpark draft with its own settings (4 tokens at most, stopped at the first one it is less than 75% sure of): five other settings were measured, none is faster | after a short prompt, 30.4 with it (`rhel8-b5399`) and 23.1 without (`rhel8-b5397`) | `SPEC`, `DRAFT=` |
 | Tools | The time of every kind of node, and how fast the weights are read | | `GGML_PROFILE=1` |
 | Packages | CPU-only builds for RHEL 8 (`avx2`, `avx512`, `avx512-bf16`) with the scripts | | |
 
@@ -118,7 +119,6 @@ What each change does, how it was checked and what else was measured: [docs/deep
 
 ## Not measured yet
 
-- The settings of the DSpark draft. The drafter stops a draft at the first token it is less than 75% sure of (`p_min`), a default that was never compared with others on this server, where it proposes about 1.9 of its 4 tokens per step. `profil.sh` compares them: `SPEC=dspark:n_max=4,p_min=0.5` among its `VARS`.
 - What the attention through Intel AMX (`GGML_AMX_ATTN=1`) does to the answers. Its speed is measured: a prompt is read 26% faster. It rounds queries, cache rows and attention weights to 8 significant bits, 0.26% from the exact result on random numbers, and the text generated after the same prompt is another one. Whether the answers are as good has not been compared, which is why it is not the default.
 - The non-expert tensors in `Q6_K` instead of `Q8_0` (`recompresser.sh`): fewer bytes to read per token, estimated at 8 to 12% for the generation, and it changes the model.
 

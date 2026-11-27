@@ -12,7 +12,10 @@
 #   M        préfixe du modèle à lancer, P par défaut ; ...-R8Q6 pour le modèle de recompresser.sh
 #   DRAFT    fichier du drafter dans NFS, vide = sans drafter ; par défaut dspark-...-Q8_0-R8.gguf s'il y
 #            est (le drafter converti, lu plus vite), sinon dspark-...-Q8_0.gguf
-#   SPEC     réglage du drafter, dspark:n_max=4 par défaut
+#   SPEC     réglage du drafter, dspark:n_max=4 par défaut : 4 tokens au plus par brouillon, coupé au premier
+#            token dont le drafter est sûr à moins de 75 % (p_min). Mesuré avec rhel8-b5399 sur cinq sujets :
+#            30,4 tokens/s ; p_min=0.5, 0.3 ou 0 donnent 30,8, 30,1 et 30,6, n_max=5 30,1 (p_min=0.3) et 28,8
+#            (p_min=0). Aucun n'est plus rapide : un pas donne plus de tokens et dure d'autant plus longtemps.
 #   T        threads. Par défaut un par cœur physique, avec ou sans drafter : c'est ce que profil.sh a mesuré
 #            de plus rapide sur 2 x 16 cœurs à hyperthreading (rhel8-b5379, moyenne de cinq sujets). Sans
 #            drafter, 22,9 tokens/s à 32 threads contre 21,5 à 64 ; avec, 29,6 contre 28,3, et après un prompt
