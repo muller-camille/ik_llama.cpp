@@ -29,9 +29,9 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 1. Take the package of the [latest release](https://github.com/muller-camille/ik_llama.cpp/releases/latest). Nothing has to be installed:
 
    ```
-   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5404/ik_llama-rhel8-b5404-bin-rhel8-x64.tar.gz
-   tar xzf ik_llama-rhel8-b5404-bin-rhel8-x64.tar.gz
-   cd ik_llama-rhel8-b5404
+   curl -L -O https://github.com/muller-camille/ik_llama.cpp/releases/download/rhel8-b5406/ik_llama-rhel8-b5406-bin-rhel8-x64.tar.gz
+   tar xzf ik_llama-rhel8-b5406-bin-rhel8-x64.tar.gz
+   cd ik_llama-rhel8-b5406
    ```
 
 2. Repack the model files once, and the drafter. The repacked files are the ones the server maps from the RAM disks:
@@ -68,6 +68,7 @@ What it takes: a machine with two sockets and about 780 GiB of free memory for t
 | `HOST`, `PORT` | `127.0.0.1`, `8080` | where the server listens; `0.0.0.0` is every network interface |
 | `P`, `M` | `DeepSeek-V4.1-Flash-1017-UD-Q4_K_XL-R8` | model to load, and model to run if it is another one |
 | `DRAFT`, `SPEC` | the repacked drafter if it is in `NFS`, `dspark:n_max=4` | drafter file (empty: none) and its setting |
+| `MMPROJ` | empty | file of the image encoder in `NFS` (`mmproj-F16.gguf` from the repository of the model): with it the server accepts images, without it it refuses them. Not tried on this server yet, see [Not measured yet](#not-measured-yet) |
 | `T`, `TB` | one thread per physical core | threads, and threads for batches of tokens if they differ |
 | `CTX` | `131072` | context size in tokens |
 | `UBATCH` | `2048` | tokens of a prompt read together |
@@ -109,6 +110,7 @@ One line per change. The figures are tokens per second with `rhel8-b5379` after 
 | Prompt | The attention of a batch through Intel AMX, on request | 359 read, 452 with it (`rhel8-b5390`) | `GGML_AMX_ATTN=1` turns it on |
 | Server | The conversations it sets aside are files on a RAM disk: still there after a restart or a crash, and after a change of the context size | read again from the first token | `--cache-ram-dir DIR`, `CACHE_DIR` |
 | Server | A request larger than the context is refused without being read | read for 6 to 7 minutes | |
+| Clients | Images, on request: `deepseek.sh` loads the image encoder of the model | an image is refused (`image input is not supported`) | `MMPROJ=mmproj-F16.gguf` |
 | Clients | The fields of DeepSeek's API, tool arguments as JSON Schema means them, Unsloth's chat template recognized | a model could not write a Metabase query | |
 | Loading | The GGUF files of upstream llama.cpp load as they are, engram table and DSpark draft included | | |
 | Draft | The DSpark draft with its own settings (4 tokens at most, stopped at the first one it is less than 75% sure of): five other settings were measured, none is faster | after a short prompt, 30.4 with it (`rhel8-b5399`) and 23.1 without (`rhel8-b5397`) | `SPEC`, `DRAFT=` |
@@ -120,6 +122,7 @@ What each change does, how it was checked and what else was measured: [docs/deep
 ## Not measured yet
 
 - What the attention through Intel AMX (`GGML_AMX_ATTN=1`) does to the answers. Its speed is measured: a prompt is read 26% faster. It rounds queries, cache rows and attention weights to 8 significant bits, 0.26% from the exact result on random numbers, and the text generated after the same prompt is another one. Whether the answers are as good has not been compared, which is why it is not the default.
+- Images (`MMPROJ=mmproj-F16.gguf`). The engine has the encoder of DeepSeek-V4.1 and routes image tokens through the experts in its own way, the server keeps the draft with it, and a saved conversation keeps what it needs of its images; all of that is read in the code, none of it was run on this server: neither that an image is read right, nor how long it takes, nor the draft and the saved conversations with images.
 - The non-expert tensors in `Q6_K` instead of `Q8_0` (`recompresser.sh`): fewer bytes to read per token, estimated at 8 to 12% for the generation, and it changes the model.
 
 ## More

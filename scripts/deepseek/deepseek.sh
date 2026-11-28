@@ -16,6 +16,14 @@
 #            token dont le drafter est sûr à moins de 75 % (p_min). Mesuré avec rhel8-b5399 sur cinq sujets :
 #            30,4 tokens/s ; p_min=0.5, 0.3 ou 0 donnent 30,8, 30,1 et 30,6, n_max=5 30,1 (p_min=0.3) et 28,8
 #            (p_min=0). Aucun n'est plus rapide : un pas donne plus de tokens et dure d'autant plus longtemps.
+#   MMPROJ   fichier de l'encodeur d'images dans NFS, vide par défaut : le modèle ne lit alors que du
+#            texte, et le serveur refuse une image (« image input is not supported »). DeepSeek-V4.1-Flash
+#            lit les images avec son encodeur, un fichier à part du dépôt du modèle : mmproj-F16.gguf
+#            (926 Mio), à mettre tel quel dans NFS, sans conversion. Avec MMPROJ=mmproj-F16.gguf le script
+#            le copie en RAM avec les poids et le serveur le charge (option --mmproj). Pas encore essayé
+#            sur ce serveur, ni mesuré. D'après le code du serveur, le drafter reste en service. Les
+#            conversations gardées dans CACHE_DIR sans l'encodeur ne sont pas reprises avec lui, ni
+#            l'inverse : elles restent dans le dossier, où elles prennent de la place.
 #   T        threads. Par défaut un par cœur physique, avec ou sans drafter : c'est ce que profil.sh a mesuré
 #            de plus rapide sur 2 x 16 cœurs à hyperthreading (rhel8-b5379, moyenne de cinq sujets). Sans
 #            drafter, 22,9 tokens/s à 32 threads contre 21,5 à 64 ; avec, 29,6 contre 28,3, et après un prompt
@@ -95,6 +103,7 @@ if [ -z "${DRAFT+x}" ]; then
     [ ! -f "$NFS/${DRAFT%.gguf}-R8.gguf" ] || DRAFT=${DRAFT%.gguf}-R8.gguf
 fi
 SPEC=${SPEC:-dspark:n_max=4}
+MMPROJ=${MMPROJ:-}
 API_KEY=${API_KEY:-}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8080}
@@ -116,7 +125,10 @@ case $HOST in
     127.0.0.1|localhost|::1) ;;
     *) [ -n "$API_KEY" ] || { echo "HOST=$HOST ouvre le serveur au réseau : indiquez API_KEY (dans ~/.deepseek.conf ou devant la commande)."; exit 1; } ;;
 esac
-for f in "$NFS/$P-00001-of-00009.gguf" "$NFS/$P-00008-of-00009.gguf" ${DRAFT:+"$NFS/$DRAFT"}; do
+case $MMPROJ in
+    */*) echo "MMPROJ est le nom d'un fichier du dossier NFS, sans chemin : $MMPROJ"; exit 1 ;;
+esac
+for f in "$NFS/$P-00001-of-00009.gguf" "$NFS/$P-00008-of-00009.gguf" ${DRAFT:+"$NFS/$DRAFT"} ${MMPROJ:+"$NFS/$MMPROJ"}; do
     [ -f "$f" ] || { echo "Fichier introuvable : $f (le NFS est-il monté ?)"; exit 1; }
 done
 sudo -v   # demande le mot de passe sudo une fois, dès le début
@@ -142,7 +154,7 @@ esac
 
 # --- chargement (ne recopie que ce qui manque) -----------------------------
 echo "== Poids et drafter vers le socket 0"
-rsync -a --size-only --inplace --info=progress2 "$NFS"/$P-0000[1-79]-of-00009.gguf ${DRAFT:+"$NFS/$DRAFT"} /mnt/ds0/
+rsync -a --size-only --inplace --info=progress2 "$NFS"/$P-0000[1-79]-of-00009.gguf ${DRAFT:+"$NFS/$DRAFT"} ${MMPROJ:+"$NFS/$MMPROJ"} /mnt/ds0/
 echo "== Copie vers le socket 1"
 rsync -a --size-only --inplace --info=progress2 /mnt/ds0/$P-0000[1-79]-of-00009.gguf ${DRAFT:+"/mnt/ds0/$DRAFT"} /mnt/ds1/
 echo "== Table engram"
@@ -166,8 +178,9 @@ ARGS=(-m "/mnt/ds0/$M-00001-of-00009.gguf" --numa-mirror /mnt/ds1
 [ -z "$TB" ]      || ARGS+=(-tb "$TB")
 [ -z "$API_KEY" ] || ARGS+=(--api-key "$API_KEY")
 [ -z "$DRAFT" ]   || ARGS+=(-md "/mnt/ds0/$DRAFT" --spec-type "$SPEC")
+[ -z "$MMPROJ" ]  || ARGS+=(--mmproj "/mnt/ds0/$MMPROJ")
 [ -z "$CACHE_DIR" ] || ARGS+=(-cram-dir "$CACHE_DIR")
 ARGS+=(-b "$((UBATCH > 2048 ? UBATCH : 2048))" -ub "$UBATCH")
-echo "== Démarrage du serveur sur $HOST:$PORT, $T threads${TB:+ ($TB pour les lots de tokens)}, modèle $M (Ctrl+C pour l'arrêter)"
+echo "== Démarrage du serveur sur $HOST:$PORT, $T threads${TB:+ ($TB pour les lots de tokens)}, modèle $M${MMPROJ:+, images avec $MMPROJ} (Ctrl+C pour l'arrêter)"
 cd "$IK_DIR"
 exec numactl --interleave=all ./llama-server "${ARGS[@]}"
